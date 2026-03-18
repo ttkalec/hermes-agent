@@ -89,6 +89,8 @@ from agent.prompt_builder import build_skills_system_prompt, build_context_files
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
+    build_tool_progress_topic as _build_tool_progress_topic,
+    build_tool_status_text as _build_tool_status_text,
     get_cute_tool_message as _get_cute_tool_message_impl,
     _detect_tool_failure,
     get_tool_emoji as _get_tool_emoji,
@@ -763,6 +765,7 @@ class AIAgent:
                     self._memory_store.load_from_disk()
                     if self._memory_enabled and self._memory_backend == "qmd":
                         self._qmd_memory = QmdMemoryManager(_hermes_home, mem_config)
+                        self._qmd_memory.schedule_sync_if_stale(force=False)
             except Exception:
                 pass  # Memory is optional -- don't break agent init
         
@@ -1815,6 +1818,27 @@ class AIAgent:
         except Exception as e:
             logger.debug("Honcho user observation failed: %s", e)
             return json.dumps({"success": False, "error": f"Honcho save failed: {e}"})
+
+    @staticmethod
+    def _should_include_qmd_sessions(user_message: str) -> bool:
+        text = (user_message or "").strip().lower()
+        if not text:
+            return False
+
+        continuity_markers = (
+            "last time",
+            "previous session",
+            "previous conversation",
+            "remember when",
+            "what were we doing",
+            "where did we leave off",
+            "pick up where",
+            "continue where",
+            "worked on before",
+            "earlier conversation",
+            "resume from",
+        )
+        return any(marker in text for marker in continuity_markers)
 
     def _honcho_sync(self, user_content: str, assistant_content: str) -> None:
         """Sync the user/assistant message pair to Honcho."""
@@ -3991,7 +4015,7 @@ class AIAgent:
                         if self._honcho and flush_target == "user" and args.get("action") == "add":
                             self._honcho_save_user_observation(args.get("content", ""))
                         if self._qmd_memory and isinstance(result, dict) and result.get("success") and flush_target in {"memory", "user"}:
-                            self._qmd_memory.sync(force=True)
+                            self._qmd_memory.schedule_sync_if_stale(force=True)
                         if not self.quiet_mode:
                             print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
                     except Exception as e:
@@ -4134,7 +4158,7 @@ class AIAgent:
             if self._honcho and target == "user" and function_args.get("action") == "add":
                 self._honcho_save_user_observation(function_args.get("content", ""))
             if self._qmd_memory and isinstance(result, dict) and result.get("success") and target in {"memory", "user"}:
-                self._qmd_memory.sync(force=True)
+                self._qmd_memory.schedule_sync_if_stale(force=True)
             return result
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
@@ -4467,7 +4491,7 @@ class AIAgent:
                 if self._honcho and target == "user" and function_args.get("action") == "add":
                     self._honcho_save_user_observation(function_args.get("content", ""))
                 if self._qmd_memory and isinstance(function_result, dict) and function_result.get("success") and target in {"memory", "user"}:
-                    self._qmd_memory.sync(force=True)
+                    self._qmd_memory.schedule_sync_if_stale(force=True)
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -4517,11 +4541,15 @@ class AIAgent:
             elif self.quiet_mode and not self._has_stream_consumers():
                 face = random.choice(KawaiiSpinner.KAWAII_WAITING)
                 emoji = _get_tool_emoji(function_name)
-                preview = _build_tool_preview(function_name, function_args) or function_name
-                if len(preview) > 30:
-                    preview = preview[:27] + "..."
-                spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots')
+                status_text = _build_tool_progress_topic(
+                    function_name,
+                    function_args,
+                    preview=_build_tool_preview(function_name, function_args),
+                    max_len=42,
+                )
+                spinner = KawaiiSpinner(f"{face} {emoji} {status_text}", spinner_type='dots')
                 spinner.start()
+
                 _spinner_result = None
                 try:
                     function_result = handle_function_call(
@@ -4928,12 +4956,12 @@ class AIAgent:
 
         if self._qmd_memory:
             try:
-                qmd_context = self._qmd_memory.search_context(original_user_message)
+                qmd_context = self._qmd_memory.search_context(
+                    original_user_message,
+                    include_sessions=self._should_include_qmd_sessions(original_user_message),
+                )
                 if qmd_context:
-                    if not conversation_history:
-                        self._qmd_context = qmd_context
-                    else:
-                        self._qmd_turn_context = qmd_context
+                    self._qmd_turn_context = qmd_context
             except Exception as e:
                 logger.debug("QMD prefetch failed (non-fatal): %s", e)
 
@@ -4979,10 +5007,6 @@ class AIAgent:
                 if self._honcho_context:
                     self._cached_system_prompt = (
                         self._cached_system_prompt + "\n\n" + self._honcho_context
-                    ).strip()
-                if self._qmd_context:
-                    self._cached_system_prompt = (
-                        self._cached_system_prompt + "\n\n" + self._qmd_context
                     ).strip()
                 # Store the system prompt snapshot in SQLite
                 if self._session_db:

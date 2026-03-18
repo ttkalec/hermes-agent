@@ -18,7 +18,7 @@ import pytest
 
 import run_agent
 from honcho_integration.client import HonchoClientConfig
-from run_agent import AIAgent, _inject_honcho_turn_context
+from run_agent import AIAgent, _inject_honcho_turn_context, _inject_qmd_turn_context
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
 
@@ -1801,6 +1801,125 @@ class TestHonchoPrefetchScheduling:
 
         agent._honcho.prefetch_context.assert_called_once_with("session-key", "what next?")
         agent._honcho.prefetch_dialectic.assert_called_once_with("session-key", "what next?")
+
+
+class TestQmdRecall:
+    def test_qmd_backend_schedules_stale_sync_on_init(self):
+        hcfg = HonchoClientConfig(enabled=False, api_key="***")
+        qmd_mgr = MagicMock()
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={
+                    "memory": {
+                        "backend": "qmd",
+                        "memory_enabled": True,
+                        "user_profile_enabled": True,
+                        "qmd": {},
+                    }
+                },
+            ),
+            patch("tools.memory_tool.MemoryStore") as mock_store,
+            patch("run_agent.QmdMemoryManager", return_value=qmd_mgr),
+            patch("honcho_integration.client.HonchoClientConfig.from_global_config", return_value=hcfg),
+            patch("honcho_integration.client.get_honcho_client") as mock_client,
+        ):
+            agent = AIAgent(
+                api_key="***",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=False,
+            )
+
+        assert agent._qmd_memory is qmd_mgr
+        mock_store.return_value.load_from_disk.assert_called_once_with()
+        qmd_mgr.schedule_sync_if_stale.assert_called_once_with(force=False)
+        mock_client.assert_not_called()
+
+    def test_inject_qmd_turn_context_appends_system_note(self):
+        content = _inject_qmd_turn_context("hello", "QMD Recall:\nprior context")
+        assert "hello" in content
+        assert "QMD memory was retrieved from Hermes memory files" in content
+        assert "QMD Recall:" in content
+
+    def test_qmd_first_turn_keeps_recall_out_of_system_prompt(self, agent):
+        captured = {}
+
+        def _fake_api_call(api_kwargs):
+            captured.update(api_kwargs)
+            return _mock_response(content="done", finish_reason="stop")
+
+        agent._qmd_memory = MagicMock()
+        agent._qmd_memory.search_context.return_value = "QMD Recall:\nRemember the migration checklist."
+        agent._use_prompt_caching = False
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+        ):
+            result = agent.run_conversation("what next?")
+
+        assert result["completed"] is True
+        api_messages = captured["messages"]
+        assert api_messages[0]["role"] == "system"
+        assert "migration checklist" not in api_messages[0]["content"]
+        current_user = api_messages[-1]
+        assert current_user["role"] == "user"
+        assert "what next?" in current_user["content"]
+        assert "migration checklist" in current_user["content"]
+        assert "QMD memory was retrieved from Hermes memory files" in current_user["content"]
+
+    def test_qmd_recall_only_searches_sessions_for_continuity_queries(self, agent):
+        captured = {}
+
+        def _fake_api_call(api_kwargs):
+            captured.update(api_kwargs)
+            return _mock_response(content="done", finish_reason="stop")
+
+        agent._qmd_memory = MagicMock()
+        agent._qmd_memory.search_context.return_value = ""
+        agent._use_prompt_caching = False
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+        ):
+            result = agent.run_conversation("hello there")
+
+        assert result["completed"] is True
+        agent._qmd_memory.search_context.assert_called_once_with("hello there", include_sessions=False)
+
+    def test_qmd_recall_includes_sessions_for_continuity_queries(self, agent):
+        captured = {}
+
+        def _fake_api_call(api_kwargs):
+            captured.update(api_kwargs)
+            return _mock_response(content="done", finish_reason="stop")
+
+        agent._qmd_memory = MagicMock()
+        agent._qmd_memory.search_context.return_value = ""
+        agent._use_prompt_caching = False
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+        ):
+            result = agent.run_conversation("what were we doing last time?")
+
+        assert result["completed"] is True
+        agent._qmd_memory.search_context.assert_called_once_with(
+            "what were we doing last time?", include_sessions=True
+        )
 
 
 # ---------------------------------------------------------------------------
