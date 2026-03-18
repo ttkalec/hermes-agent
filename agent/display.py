@@ -195,6 +195,215 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | N
     return preview
 
 
+def build_tool_status_text(tool_name: str, args: dict | None = None, max_len: int = 60) -> str:
+    """Return a short human-readable description of what a tool is doing."""
+    args = args or {}
+
+    def _trunc(text: str, limit: int = max_len) -> str:
+        text = _oneline(str(text))
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    def _domain(url: str) -> str:
+        text = str(url or "")
+        return text.replace("https://", "").replace("http://", "").split("/")[0] or "the page"
+
+    def _label_path(path: str) -> str:
+        text = str(path or "")
+        if not text:
+            return "a file"
+        parts = [part for part in text.replace("\\", "/").split("/") if part]
+        return _trunc(parts[-1] if parts else text, 36)
+
+    if tool_name == "web_search":
+        query = _trunc(args.get("query", ""), 45)
+        return f"Searching the web for \"{query}\"" if query else "Searching the web"
+    if tool_name == "web_extract":
+        urls = args.get("urls", [])
+        url = urls[0] if isinstance(urls, list) and urls else urls
+        return f"Reading { _domain(url) }" if url else "Reading the web pages"
+    if tool_name == "web_crawl":
+        return f"Crawling {_domain(args.get('url', ''))}"
+    if tool_name == "terminal":
+        return "Running a shell command"
+    if tool_name == "process":
+        action = args.get("action", "checking")
+        labels = {
+            "list": "Checking background processes",
+            "poll": "Checking background process status",
+            "log": "Reading background process output",
+            "wait": "Waiting for the background process",
+            "kill": "Stopping the background process",
+            "write": "Sending input to the background process",
+            "submit": "Submitting input to the background process",
+        }
+        return labels.get(action, f"Handling background process: {action}")
+    if tool_name == "read_file":
+        return f"Checking {_label_path(args.get('path', ''))}"
+    if tool_name == "write_file":
+        return f"Writing {_label_path(args.get('path', ''))}"
+    if tool_name == "patch":
+        return f"Editing {_label_path(args.get('path', ''))}"
+    if tool_name == "search_files":
+        pattern = _trunc(args.get("pattern", ""), 38)
+        if args.get("target") == "files":
+            return f"Looking for files matching \"{pattern}\"" if pattern else "Looking for matching files"
+        return f"Searching files for \"{pattern}\"" if pattern else "Searching the files"
+    if tool_name == "browser_navigate":
+        return f"Opening {_domain(args.get('url', ''))}"
+    if tool_name == "browser_snapshot":
+        return "Inspecting the current page"
+    if tool_name == "browser_click":
+        ref = args.get("ref", "an element")
+        return f"Clicking {ref}"
+    if tool_name == "browser_type":
+        return "Typing into the page"
+    if tool_name == "browser_scroll":
+        return f"Scrolling {args.get('direction', 'down')}"
+    if tool_name == "browser_back":
+        return "Going back"
+    if tool_name == "browser_press":
+        return f"Pressing {args.get('key', 'a key')}"
+    if tool_name == "browser_close":
+        return "Closing the browser"
+    if tool_name == "browser_get_images":
+        return "Collecting images from the page"
+    if tool_name == "browser_vision":
+        return "Analyzing the page visually"
+    if tool_name == "todo":
+        todos_arg = args.get("todos")
+        if todos_arg is None:
+            return "Checking the task list"
+        if args.get("merge", False):
+            return "Updating the task list"
+        return "Planning the work"
+    if tool_name == "session_search":
+        return "Recalling earlier conversations"
+    if tool_name == "memory":
+        action = args.get("action", "update")
+        if action == "add":
+            return "Saving a memory"
+        if action == "replace":
+            return "Updating a memory"
+        if action == "remove":
+            return "Removing a memory"
+        return "Updating memory"
+    if tool_name == "skills_list":
+        return "Checking available skills"
+    if tool_name == "skill_view":
+        return f"Loading the {_trunc(args.get('name', 'requested'), 24)} skill"
+    if tool_name == "image_generate":
+        return "Generating an image"
+    if tool_name == "text_to_speech":
+        return "Generating audio"
+    if tool_name == "vision_analyze":
+        return "Analyzing the image"
+    if tool_name == "mixture_of_agents":
+        return "Comparing answers across multiple models"
+    if tool_name == "send_message":
+        return f"Sending a message to {args.get('target', 'the destination')}"
+    if tool_name == "cronjob":
+        action = args.get("action", "check")
+        labels = {
+            "create": "Scheduling a task",
+            "list": "Checking scheduled tasks",
+            "update": "Updating a scheduled task",
+            "pause": "Pausing a scheduled task",
+            "resume": "Resuming a scheduled task",
+            "remove": "Removing a scheduled task",
+            "run": "Running a scheduled task now",
+        }
+        return labels.get(action, f"Handling cron task: {action}")
+    if tool_name.startswith("rl_"):
+        return "Working with the training environment"
+    if tool_name == "execute_code":
+        return "Running a short helper script"
+    if tool_name == "delegate_task":
+        tasks = args.get("tasks")
+        if tasks and isinstance(tasks, list):
+            return f"Delegating {len(tasks)} task(s) to subagents"
+        return "Delegating work to a subagent"
+    if tool_name == "clarify":
+        return "Asking for clarification"
+    if tool_name == "skill_manage":
+        return "Updating a skill"
+
+    preview = build_tool_preview(tool_name, args, max_len=40)
+    if preview:
+        return f"Using {tool_name}: {_trunc(preview, 40)}"
+    return f"Using {tool_name}"
+
+
+def build_tool_progress_topic(
+    tool_name: str,
+    args: dict | None = None,
+    preview: str | None = None,
+    max_len: int = 72,
+) -> str:
+    """Return a higher-level progress update that can collapse many tiny steps."""
+    args = args or {}
+
+    def _trunc(text: str, limit: int = max_len) -> str:
+        text = _oneline(str(text))
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    hint_parts = []
+    if preview:
+        hint_parts.append(str(preview))
+    for key in ("query", "pattern", "path", "url", "command", "text", "name"):
+        value = args.get(key)
+        if value:
+            hint_parts.append(str(value))
+    urls = args.get("urls")
+    if isinstance(urls, list):
+        hint_parts.extend(str(url) for url in urls[:3])
+    elif urls:
+        hint_parts.append(str(urls))
+    hint_text = " ".join(hint_parts).lower()
+
+    config_terms = (
+        "config", "configuration", "settings", "setting", "preferences",
+        ".yaml", ".yml", ".json", ".toml", ".ini", ".env",
+    )
+    docs_terms = (
+        "docs", "doc", "documentation", "readme", "guide", "reference", "manual", "api",
+    )
+    model_terms = (
+        "model", "models", "provider", "providers", "openrouter", "anthropic", "openai",
+        "gpt", "claude", "gemini", "llama", "mistral", "qwen",
+    )
+
+    if tool_name == "subagent_progress":
+        return _trunc(preview or "Working through delegated tasks")
+    if tool_name == "_thinking":
+        return _trunc(preview or "Thinking through the task")
+
+    if any(term in hint_text for term in config_terms):
+        return "Checking your config"
+    if any(term in hint_text for term in docs_terms) and tool_name in {
+        "web_search", "web_extract", "browser_navigate", "browser_snapshot", "search_files", "read_file",
+    }:
+        return "Searching the docs"
+    if any(term in hint_text for term in model_terms):
+        return "Verifying available models"
+
+    if tool_name in {"read_file", "search_files"}:
+        return "Inspecting local files"
+    if tool_name in {"write_file", "patch"}:
+        return "Updating local files"
+    if tool_name in {"web_search", "web_extract", "web_crawl"}:
+        return "Researching online"
+    if tool_name.startswith("browser_"):
+        return "Working in the browser"
+    if tool_name in {"terminal", "process", "execute_code"}:
+        return "Running task commands"
+    if tool_name == "todo":
+        return "Planning the work"
+    if tool_name == "delegate_task":
+        return "Delegating work to subagents"
+
+    return _trunc(build_tool_status_text(tool_name, args, max_len=max_len), max_len)
+
+
 # =========================================================================
 # KawaiiSpinner
 # =========================================================================
@@ -419,156 +628,19 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
 def get_cute_tool_message(
     tool_name: str, args: dict, duration: float, result: str | None = None,
 ) -> str:
-    """Generate a formatted tool completion line for CLI quiet mode.
-
-    Format: ``| {emoji} {verb:9} {detail}  {duration}``
-
-    When *result* is provided the line is checked for failure indicators.
-    Failed tool calls get a red prefix and an informational suffix.
-    """
+    """Generate a human-readable tool completion line for CLI quiet mode."""
     dur = f"{duration:.1f}s"
     is_failure, failure_suffix = _detect_tool_failure(tool_name, result)
     skin_prefix = get_skin_tool_prefix()
+    emoji = get_tool_emoji(tool_name, default="⚡")
+    status_text = build_tool_status_text(tool_name, args, max_len=56)
 
-    def _trunc(s, n=40):
-        s = str(s)
-        return (s[:n-3] + "...") if len(s) > n else s
-
-    def _path(p, n=35):
-        p = str(p)
-        return ("..." + p[-(n-3):]) if len(p) > n else p
-
-    def _wrap(line: str) -> str:
-        """Apply skin tool prefix and failure suffix."""
-        if skin_prefix != "┊":
-            line = line.replace("┊", skin_prefix, 1)
-        if not is_failure:
-            return line
-        return f"{line}{failure_suffix}"
-
-    if tool_name == "web_search":
-        return _wrap(f"┊ 🔍 search    {_trunc(args.get('query', ''), 42)}  {dur}")
-    if tool_name == "web_extract":
-        urls = args.get("urls", [])
-        if urls:
-            url = urls[0] if isinstance(urls, list) else str(urls)
-            domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-            extra = f" +{len(urls)-1}" if len(urls) > 1 else ""
-            return _wrap(f"┊ 📄 fetch     {_trunc(domain, 35)}{extra}  {dur}")
-        return _wrap(f"┊ 📄 fetch     pages  {dur}")
-    if tool_name == "web_crawl":
-        url = args.get("url", "")
-        domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-        return _wrap(f"┊ 🕸️  crawl     {_trunc(domain, 35)}  {dur}")
-    if tool_name == "terminal":
-        return _wrap(f"┊ 💻 $         {_trunc(args.get('command', ''), 42)}  {dur}")
-    if tool_name == "process":
-        action = args.get("action", "?")
-        sid = args.get("session_id", "")[:12]
-        labels = {"list": "ls processes", "poll": f"poll {sid}", "log": f"log {sid}",
-                  "wait": f"wait {sid}", "kill": f"kill {sid}", "write": f"write {sid}", "submit": f"submit {sid}"}
-        return _wrap(f"┊ ⚙️  proc      {labels.get(action, f'{action} {sid}')}  {dur}")
-    if tool_name == "read_file":
-        return _wrap(f"┊ 📖 read      {_path(args.get('path', ''))}  {dur}")
-    if tool_name == "write_file":
-        return _wrap(f"┊ ✍️  write     {_path(args.get('path', ''))}  {dur}")
-    if tool_name == "patch":
-        return _wrap(f"┊ 🔧 patch     {_path(args.get('path', ''))}  {dur}")
-    if tool_name == "search_files":
-        pattern = _trunc(args.get("pattern", ""), 35)
-        target = args.get("target", "content")
-        verb = "find" if target == "files" else "grep"
-        return _wrap(f"┊ 🔎 {verb:9} {pattern}  {dur}")
-    if tool_name == "browser_navigate":
-        url = args.get("url", "")
-        domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-        return _wrap(f"┊ 🌐 navigate  {_trunc(domain, 35)}  {dur}")
-    if tool_name == "browser_snapshot":
-        mode = "full" if args.get("full") else "compact"
-        return _wrap(f"┊ 📸 snapshot  {mode}  {dur}")
-    if tool_name == "browser_click":
-        return _wrap(f"┊ 👆 click     {args.get('ref', '?')}  {dur}")
-    if tool_name == "browser_type":
-        return _wrap(f"┊ ⌨️  type      \"{_trunc(args.get('text', ''), 30)}\"  {dur}")
-    if tool_name == "browser_scroll":
-        d = args.get("direction", "down")
-        arrow = {"down": "↓", "up": "↑", "right": "→", "left": "←"}.get(d, "↓")
-        return _wrap(f"┊ {arrow}  scroll    {d}  {dur}")
-    if tool_name == "browser_back":
-        return _wrap(f"┊ ◀️  back      {dur}")
-    if tool_name == "browser_press":
-        return _wrap(f"┊ ⌨️  press     {args.get('key', '?')}  {dur}")
-    if tool_name == "browser_close":
-        return _wrap(f"┊ 🚪 close     browser  {dur}")
-    if tool_name == "browser_get_images":
-        return _wrap(f"┊ 🖼️  images    extracting  {dur}")
-    if tool_name == "browser_vision":
-        return _wrap(f"┊ 👁️  vision    analyzing page  {dur}")
-    if tool_name == "todo":
-        todos_arg = args.get("todos")
-        merge = args.get("merge", False)
-        if todos_arg is None:
-            return _wrap(f"┊ 📋 plan      reading tasks  {dur}")
-        elif merge:
-            return _wrap(f"┊ 📋 plan      update {len(todos_arg)} task(s)  {dur}")
-        else:
-            return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
-    if tool_name == "session_search":
-        return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
-    if tool_name == "memory":
-        action = args.get("action", "?")
-        target = args.get("target", "")
-        if action == "add":
-            return _wrap(f"┊ 🧠 memory    +{target}: \"{_trunc(args.get('content', ''), 30)}\"  {dur}")
-        elif action == "replace":
-            return _wrap(f"┊ 🧠 memory    ~{target}: \"{_trunc(args.get('old_text', ''), 20)}\"  {dur}")
-        elif action == "remove":
-            return _wrap(f"┊ 🧠 memory    -{target}: \"{_trunc(args.get('old_text', ''), 20)}\"  {dur}")
-        return _wrap(f"┊ 🧠 memory    {action}  {dur}")
-    if tool_name == "skills_list":
-        return _wrap(f"┊ 📚 skills    list {args.get('category', 'all')}  {dur}")
-    if tool_name == "skill_view":
-        return _wrap(f"┊ 📚 skill     {_trunc(args.get('name', ''), 30)}  {dur}")
-    if tool_name == "image_generate":
-        return _wrap(f"┊ 🎨 create    {_trunc(args.get('prompt', ''), 35)}  {dur}")
-    if tool_name == "text_to_speech":
-        return _wrap(f"┊ 🔊 speak     {_trunc(args.get('text', ''), 30)}  {dur}")
-    if tool_name == "vision_analyze":
-        return _wrap(f"┊ 👁️  vision    {_trunc(args.get('question', ''), 30)}  {dur}")
-    if tool_name == "mixture_of_agents":
-        return _wrap(f"┊ 🧠 reason    {_trunc(args.get('user_prompt', ''), 30)}  {dur}")
-    if tool_name == "send_message":
-        return _wrap(f"┊ 📨 send      {args.get('target', '?')}: \"{_trunc(args.get('message', ''), 25)}\"  {dur}")
-    if tool_name == "cronjob":
-        action = args.get("action", "?")
-        if action == "create":
-            skills = args.get("skills") or ([] if not args.get("skill") else [args.get("skill")])
-            label = args.get("name") or (skills[0] if skills else None) or args.get("prompt", "task")
-            return _wrap(f"┊ ⏰ cron      create {_trunc(label, 24)}  {dur}")
-        if action == "list":
-            return _wrap(f"┊ ⏰ cron      listing  {dur}")
-        return _wrap(f"┊ ⏰ cron      {action} {args.get('job_id', '')}  {dur}")
-    if tool_name.startswith("rl_"):
-        rl = {
-            "rl_list_environments": "list envs", "rl_select_environment": f"select {args.get('name', '')}",
-            "rl_get_current_config": "get config", "rl_edit_config": f"set {args.get('field', '?')}",
-            "rl_start_training": "start training", "rl_check_status": f"status {args.get('run_id', '?')[:12]}",
-            "rl_stop_training": f"stop {args.get('run_id', '?')[:12]}", "rl_get_results": f"results {args.get('run_id', '?')[:12]}",
-            "rl_list_runs": "list runs", "rl_test_inference": "test inference",
-        }
-        return _wrap(f"┊ 🧪 rl        {rl.get(tool_name, tool_name.replace('rl_', ''))}  {dur}")
-    if tool_name == "execute_code":
-        code = args.get("code", "")
-        first_line = code.strip().split("\n")[0] if code.strip() else ""
-        return _wrap(f"┊ 🐍 exec      {_trunc(first_line, 35)}  {dur}")
-    if tool_name == "delegate_task":
-        tasks = args.get("tasks")
-        if tasks and isinstance(tasks, list):
-            return _wrap(f"┊ 🔀 delegate  {len(tasks)} parallel tasks  {dur}")
-        return _wrap(f"┊ 🔀 delegate  {_trunc(args.get('goal', ''), 35)}  {dur}")
-
-    preview = build_tool_preview(tool_name, args) or ""
-    return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")
+    line = f"┊ {emoji} {status_text}  {dur}"
+    if skin_prefix != "┊":
+        line = line.replace("┊", skin_prefix, 1)
+    if is_failure:
+        line = f"{line}{failure_suffix}"
+    return line
 
 
 # =========================================================================

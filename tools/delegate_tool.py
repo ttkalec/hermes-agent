@@ -124,21 +124,27 @@ def _build_child_progress_callback(task_index: int, parent_agent, task_count: in
                 logger.debug("Spinner print_above failed: %s", e)
 
         if parent_cb:
-            _batch.append(tool_name)
+            try:
+                from agent.display import build_tool_progress_topic
+                topic = build_tool_progress_topic(tool_name, preview=preview)
+            except Exception:
+                topic = tool_name
+            if not _batch or _batch[-1] != topic:
+                _batch.append(topic)
             if len(_batch) >= _BATCH_SIZE:
                 summary = ", ".join(_batch)
                 try:
-                    parent_cb("subagent_progress", f"🔀 {prefix}{summary}")
+                    parent_cb("subagent_progress", f"{prefix}{summary}")
                 except Exception as e:
                     logger.debug("Parent callback failed: %s", e)
                 _batch.clear()
 
     def _flush():
-        """Flush remaining batched tool names to gateway on completion."""
+        """Flush remaining batched progress topics to gateway on completion."""
         if parent_cb and _batch:
             summary = ", ".join(_batch)
             try:
-                parent_cb("subagent_progress", f"🔀 {prefix}{summary}")
+                parent_cb("subagent_progress", f"{prefix}{summary}")
             except Exception as e:
                 logger.debug("Parent callback flush failed: %s", e)
             _batch.clear()

@@ -4182,6 +4182,7 @@ class GatewayRunner:
         progress_queue = queue.Queue() if tool_progress_enabled else None
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
+        last_progress_topic = [None]  # Track higher-level progress topic
         repeat_count = [0]  # How many times the same message repeated
         
         def progress_callback(tool_name: str, preview: str = None, args: dict = None):
@@ -4194,8 +4195,8 @@ class GatewayRunner:
                 return
             last_tool[0] = tool_name
             
-            # Build progress message with primary argument preview
-            from agent.display import get_tool_emoji
+            # Build progress message with a short human-readable description
+            from agent.display import get_tool_emoji, build_tool_progress_topic
             emoji = get_tool_emoji(tool_name, default="⚙️")
             
             # Verbose mode: show detailed arguments
@@ -4208,13 +4209,17 @@ class GatewayRunner:
                 progress_queue.put(msg)
                 return
             
-            if preview:
-                # Truncate preview to keep messages clean
-                if len(preview) > 80:
-                    preview = preview[:77] + "..."
-                msg = f"{emoji} {tool_name}: \"{preview}\""
-            else:
-                msg = f"{emoji} {tool_name}..."
+            topic_text = build_tool_progress_topic(tool_name, args, preview=preview, max_len=72)
+            msg = f"{emoji} {topic_text}"
+
+            # Collapse many tiny tool calls into fewer higher-level updates.
+            # If the topic hasn't changed, suppress the extra message entirely.
+            if progress_mode != "verbose" and topic_text == last_progress_topic[0]:
+                if msg == last_progress_msg[0]:
+                    repeat_count[0] += 1
+                    progress_queue.put(("__dedup__", msg, repeat_count[0]))
+                return
+            last_progress_topic[0] = topic_text
             
             # Dedup: collapse consecutive identical progress messages.
             # Common with execute_code where models iterate with the same

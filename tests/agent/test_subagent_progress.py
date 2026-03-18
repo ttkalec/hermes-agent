@@ -15,7 +15,7 @@ import threading
 import pytest
 from unittest.mock import MagicMock, patch
 
-from agent.display import KawaiiSpinner
+from agent.display import KawaiiSpinner, build_tool_progress_topic
 from tools.delegate_tool import _build_child_progress_callback
 
 
@@ -69,6 +69,13 @@ class TestPrintAbove:
 # =========================================================================
 # _build_child_progress_callback tests
 # =========================================================================
+
+class TestBuildToolProgressTopic:
+    def test_prefers_high_level_config_docs_and_model_labels(self):
+        assert build_tool_progress_topic("read_file", {"path": "~/.hermes/config.yaml"}) == "Checking your config"
+        assert build_tool_progress_topic("web_search", {"query": "OpenAI API docs"}) == "Searching the docs"
+        assert build_tool_progress_topic("terminal", {"command": "hermes models list"}) == "Verifying available models"
+
 
 class TestBuildChildProgressCallback:
     """Tests for child progress callback builder."""
@@ -152,6 +159,27 @@ class TestBuildChildProgressCallback:
         cb("_thinking", "some reasoning text")
         
         parent_cb.assert_not_called()
+
+    def test_gateway_batches_higher_level_topics(self):
+        """Gateway path should collapse tiny tool steps into broader progress topics."""
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent_cb = MagicMock()
+        parent.tool_progress_callback = parent_cb
+
+        cb = _build_child_progress_callback(0, parent)
+        cb("web_search", "OpenAI API docs")
+        cb("web_extract", "https://platform.openai.com/docs/models")
+        cb("read_file", "~/.hermes/config.yaml")
+        cb("terminal", "hermes models list")
+        cb._flush()
+
+        parent_cb.assert_called_once()
+        summary = parent_cb.call_args[0][1]
+        assert "Searching the docs" in summary
+        assert "Checking your config" in summary
+        assert "Verifying available models" in summary
+        assert summary.count("Searching the docs") == 1
 
     def test_parallel_callbacks_independent(self):
         """Each child's callback should have independent batch state."""
@@ -321,7 +349,7 @@ class TestBatchFlush:
     """Tests for gateway batch flush on subagent completion."""
 
     def test_flush_sends_remaining_batch(self):
-        """_flush should send remaining tool names to gateway."""
+        """_flush should send remaining higher-level progress topics to gateway."""
         parent = MagicMock()
         parent._delegate_spinner = None
         parent_cb = MagicMock()
@@ -339,8 +367,8 @@ class TestBatchFlush:
         cb._flush()
         parent_cb.assert_called_once()
         summary = parent_cb.call_args[0][1]
-        assert "web_search" in summary
-        assert "write_file" in summary
+        assert "Researching online" in summary
+        assert "Updating local files" in summary
 
     def test_flush_noop_when_batch_empty(self):
         """_flush should not send anything when batch is empty."""

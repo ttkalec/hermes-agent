@@ -83,6 +83,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     # OpenCode Zen models
     "gpt-5.4-pro": 128000,
     "gpt-5.4": 128000,
+    "gpt-5.4-mini": 128000,
     "gpt-5.3-codex": 128000,
     "gpt-5.3-codex-spark": 128000,
     "gpt-5.2": 128000,
