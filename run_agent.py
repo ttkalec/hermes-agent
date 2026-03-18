@@ -93,6 +93,7 @@ from agent.display import (
     _detect_tool_failure,
     get_tool_emoji as _get_tool_emoji,
 )
+from agent.qmd_memory import QmdMemoryManager
 from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
@@ -234,20 +235,14 @@ def _is_destructive_command(cmd: str) -> bool:
     return False
 
 
-def _inject_honcho_turn_context(content, turn_context: str):
-    """Append Honcho recall to the current-turn user message without mutating history.
-
-    The returned content is sent to the API for this turn only. Keeping Honcho
-    recall out of the system prompt preserves the stable cache prefix while
-    still giving the model continuity context.
-    """
+def _inject_turn_context(content, turn_context: str, label: str, source_description: str):
+    """Append retrieved continuity context to the current-turn user message only."""
     if not turn_context:
         return content
 
     note = (
-        "[System note: The following Honcho memory was retrieved from prior "
-        "sessions. It is continuity context for this turn only, not new user "
-        "input.]\n\n"
+        f"[System note: The following {label} was retrieved from {source_description}. "
+        "It is continuity context for this turn only, not new user input.]\n\n"
         f"{turn_context}"
     )
 
@@ -258,6 +253,14 @@ def _inject_honcho_turn_context(content, turn_context: str):
     if not text.strip():
         return note
     return f"{text}\n\n{note}"
+
+
+def _inject_honcho_turn_context(content, turn_context: str):
+    return _inject_turn_context(content, turn_context, "Honcho memory", "prior sessions")
+
+
+def _inject_qmd_turn_context(content, turn_context: str):
+    return _inject_turn_context(content, turn_context, "QMD memory", "Hermes memory files")
 
 
 class AIAgent:
@@ -738,6 +741,10 @@ class AIAgent:
         self._user_profile_enabled = False
         self._memory_nudge_interval = 10
         self._memory_flush_min_turns = 6
+        self._memory_backend = "local"
+        self._qmd_memory = None
+        self._qmd_context = ""
+        self._qmd_turn_context = ""
         if not skip_memory:
             try:
                 from hermes_cli.config import load_config as _load_mem_config
@@ -746,6 +753,7 @@ class AIAgent:
                 self._user_profile_enabled = mem_config.get("user_profile_enabled", False)
                 self._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
                 self._memory_flush_min_turns = int(mem_config.get("flush_min_turns", 6))
+                self._memory_backend = str(mem_config.get("backend", "local") or "local").strip().lower()
                 if self._memory_enabled or self._user_profile_enabled:
                     from tools.memory_tool import MemoryStore
                     self._memory_store = MemoryStore(
@@ -753,6 +761,8 @@ class AIAgent:
                         user_char_limit=mem_config.get("user_char_limit", 1375),
                     )
                     self._memory_store.load_from_disk()
+                    if self._memory_enabled and self._memory_backend == "qmd":
+                        self._qmd_memory = QmdMemoryManager(_hermes_home, mem_config)
             except Exception:
                 pass  # Memory is optional -- don't break agent init
         
@@ -1926,11 +1936,16 @@ class AIAgent:
 
         if self._memory_store:
             if self._memory_enabled:
-                mem_block = self._memory_store.format_for_system_prompt("memory")
-                if mem_block:
-                    prompt_parts.append(mem_block)
-            # USER.md is always included when enabled -- Honcho prefetch is additive.
-            if self._user_profile_enabled:
+                if self._qmd_memory:
+                    prompt_parts.append(
+                        "Long-term memory and user profile notes are retrieved with QMD based on the user's message. "
+                        "Use the 'QMD Recall' section when present; do not assume the full MEMORY.md or USER.md files are injected."
+                    )
+                else:
+                    mem_block = self._memory_store.format_for_system_prompt("memory")
+                    if mem_block:
+                        prompt_parts.append(mem_block)
+            if self._user_profile_enabled and not self._qmd_memory:
                 user_block = self._memory_store.format_for_system_prompt("user")
                 if user_block:
                     prompt_parts.append(user_block)
@@ -3975,6 +3990,8 @@ class AIAgent:
                         )
                         if self._honcho and flush_target == "user" and args.get("action") == "add":
                             self._honcho_save_user_observation(args.get("content", ""))
+                        if self._qmd_memory and isinstance(result, dict) and result.get("success") and flush_target in {"memory", "user"}:
+                            self._qmd_memory.sync(force=True)
                         if not self.quiet_mode:
                             print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
                     except Exception as e:
@@ -4116,6 +4133,8 @@ class AIAgent:
             # Also send user observations to Honcho when active
             if self._honcho and target == "user" and function_args.get("action") == "add":
                 self._honcho_save_user_observation(function_args.get("content", ""))
+            if self._qmd_memory and isinstance(result, dict) and result.get("success") and target in {"memory", "user"}:
+                self._qmd_memory.sync(force=True)
             return result
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
@@ -4447,6 +4466,8 @@ class AIAgent:
                 # Also send user observations to Honcho when active
                 if self._honcho and target == "user" and function_args.get("action") == "add":
                     self._honcho_save_user_observation(function_args.get("content", ""))
+                if self._qmd_memory and isinstance(function_result, dict) and function_result.get("success") and target in {"memory", "user"}:
+                    self._qmd_memory.sync(force=True)
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -4891,6 +4912,8 @@ class AIAgent:
         # to consume background prefetch results from turn N-1.
         self._honcho_context = ""
         self._honcho_turn_context = ""
+        self._qmd_context = ""
+        self._qmd_turn_context = ""
         _recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
         if self._honcho and self._honcho_session_key and _recall_mode != "tools":
             try:
@@ -4902,6 +4925,17 @@ class AIAgent:
                         self._honcho_turn_context = prefetched_context
             except Exception as e:
                 logger.debug("Honcho prefetch failed (non-fatal): %s", e)
+
+        if self._qmd_memory:
+            try:
+                qmd_context = self._qmd_memory.search_context(original_user_message)
+                if qmd_context:
+                    if not conversation_history:
+                        self._qmd_context = qmd_context
+                    else:
+                        self._qmd_turn_context = qmd_context
+            except Exception as e:
+                logger.debug("QMD prefetch failed (non-fatal): %s", e)
 
         # Add user message
         user_msg = {"role": "user", "content": user_message}
@@ -4945,6 +4979,10 @@ class AIAgent:
                 if self._honcho_context:
                     self._cached_system_prompt = (
                         self._cached_system_prompt + "\n\n" + self._honcho_context
+                    ).strip()
+                if self._qmd_context:
+                    self._cached_system_prompt = (
+                        self._cached_system_prompt + "\n\n" + self._qmd_context
                     ).strip()
                 # Store the system prompt snapshot in SQLite
                 if self._session_db:
@@ -5061,10 +5099,15 @@ class AIAgent:
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
-                if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
-                    api_msg["content"] = _inject_honcho_turn_context(
-                        api_msg.get("content", ""), self._honcho_turn_context
-                    )
+                if idx == current_turn_user_idx and msg.get("role") == "user":
+                    if self._honcho_turn_context:
+                        api_msg["content"] = _inject_honcho_turn_context(
+                            api_msg.get("content", ""), self._honcho_turn_context
+                        )
+                    if self._qmd_turn_context:
+                        api_msg["content"] = _inject_qmd_turn_context(
+                            api_msg.get("content", ""), self._qmd_turn_context
+                        )
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved

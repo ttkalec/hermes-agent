@@ -538,6 +538,12 @@ def cmd_gateway(args):
     gateway_command(args)
 
 
+def cmd_qmd(args):
+    """QMD status/sync commands."""
+    from hermes_cli.qmd_cli import qmd_command
+    raise SystemExit(qmd_command(args))
+
+
 def cmd_whatsapp(args):
     """Set up WhatsApp: choose mode, configure, install bridge, pair via QR."""
     import os
@@ -2753,6 +2759,22 @@ For more help on a command:
     gateway_setup = gateway_subparsers.add_parser("setup", help="Configure messaging platforms")
 
     gateway_parser.set_defaults(func=cmd_gateway)
+
+    # =========================================================================
+    # qmd command
+    # =========================================================================
+    qmd_parser = subparsers.add_parser(
+        "qmd",
+        help="Inspect Hermes QMD recall status",
+        description="Inspect and sync Hermes QMD-backed memory/session recall",
+    )
+    qmd_subparsers = qmd_parser.add_subparsers(dest="qmd_command")
+    qmd_status = qmd_subparsers.add_parser("status", help="Show QMD recall status")
+    qmd_status.add_argument("--sync", action="store_true", help="Force a sync before printing status")
+    qmd_sync = qmd_subparsers.add_parser("sync", help="Force a QMD sync now")
+    qmd_parser.set_defaults(func=cmd_qmd, qmd_command="status")
+    qmd_status.set_defaults(func=cmd_qmd)
+    qmd_sync.set_defaults(func=cmd_qmd)
     
     # =========================================================================
     # setup command
@@ -3565,6 +3587,29 @@ For more help on a command:
         help="Skip confirmation prompts"
     )
     uninstall_parser.set_defaults(func=cmd_uninstall)
+
+    # =========================================================================
+    # mission-control command
+    # =========================================================================
+    mission_control_parser = subparsers.add_parser(
+        "mission-control",
+        help="Run Hermes as a Mission Control worker",
+        description="Poll Mission Control, claim tasks, execute them with Hermes, and push results to review/done",
+    )
+    mission_control_parser.add_argument("--once", action="store_true", help="Run a single task cycle and exit")
+    mission_control_parser.add_argument("--interval", type=int, default=None, help="Polling interval in seconds")
+    mission_control_parser.add_argument("--url", default=None, help="Mission Control base URL")
+    mission_control_parser.add_argument("--agent-name", default=None, help="Agent name to report to Mission Control")
+    mission_control_parser.add_argument("--model", default=None, help="Override model for worker runs")
+    mission_control_parser.add_argument("--provider", default=None, help="Override provider for worker runs")
+    mission_control_parser.add_argument("--max-iterations", type=int, default=None, help="Override max iterations per task")
+    mission_control_parser.add_argument("--done", action="store_true", help="Complete directly to Done instead of Review")
+
+    def cmd_mission_control_entry(args):
+        from hermes_cli.mission_control import cmd_mission_control
+        cmd_mission_control(args)
+
+    mission_control_parser.set_defaults(func=cmd_mission_control_entry)
 
     # =========================================================================
     # acp command

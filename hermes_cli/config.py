@@ -293,11 +293,30 @@ DEFAULT_CONFIG = {
     },
     
     # Persistent memory -- bounded curated memory injected into system prompt
+    # backend:
+    #   local (default) = inject MEMORY.md directly
+    #   qmd             = retrieve relevant MEMORY.md snippets via QMD per turn
     "memory": {
+        "backend": "local",
         "memory_enabled": True,
         "user_profile_enabled": True,
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
+        "qmd": {
+            "command": "qmd",
+            "search_mode": "query",          # query | search | vsearch
+            "max_results": 6,
+            "max_injected_chars": 2400,
+            "update_interval_seconds": 300,
+            "embed_on_sync": True,
+            "memory_path": "",
+            "cache_home": "",                # defaults to ~/.cache for model reuse
+            "sessions": {
+                "enabled": True,
+                "retention_days": 120,
+                "export_dir": "",
+            },
+        },
     },
 
     # Subagent delegation — override the provider:model used by delegate_task
@@ -309,6 +328,14 @@ DEFAULT_CONFIG = {
         "provider": "",    # e.g. "openrouter" (empty = inherit parent provider + credentials)
         "base_url": "",    # direct OpenAI-compatible endpoint for subagents
         "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
+    },
+
+    "mission_control": {
+        "url": "http://127.0.0.1:3027",
+        "agent_name": "Hermes",
+        "interval_seconds": 30,
+        "requires_review": True,
+        "max_iterations": 60,
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
