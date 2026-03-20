@@ -96,6 +96,7 @@ from agent.display import (
     get_tool_emoji as _get_tool_emoji,
 )
 from agent.qmd_memory import QmdMemoryManager
+from agent.activity_logger import activity_logger
 from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
@@ -4590,6 +4591,23 @@ class AIAgent:
             if _is_error_result:
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
+            # Log agent-level tool calls (todo, memory, session_search, clarify,
+            # delegate_task) that bypass registry.dispatch() and thus miss the
+            # registry-level activity logging.
+            if function_name in ("todo", "memory", "session_search", "clarify", "delegate_task"):
+                try:
+                    activity_logger.log_tool_call(
+                        tool_name=function_name,
+                        args=function_args,
+                        result=function_result,
+                        duration_secs=tool_duration,
+                        session_id=self.session_id,
+                        success=not _is_error_result,
+                        error_message=result_preview[:200] if _is_error_result else None,
+                    )
+                except Exception:
+                    pass
+
             if self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                 logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
@@ -5356,7 +5374,23 @@ class AIAgent:
                         self._vprint(f"{self.log_prefix}   🏢 Provider: {provider_name}", force=True)
                         self._vprint(f"{self.log_prefix}   📝 Provider message: {error_msg[:200]}", force=True)
                         self._vprint(f"{self.log_prefix}   ⏱️  Response time: {api_duration:.2f}s (fast response often indicates rate limiting)", force=True)
-                        
+
+                        # Log invalid API response to activity logger
+                        try:
+                            activity_logger.log_warning(
+                                source="model_call",
+                                message=f"Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}",
+                                session_id=self.session_id,
+                                metadata={
+                                    "model": self.model,
+                                    "provider": provider_name,
+                                    "api_duration": api_duration,
+                                    "error_details": error_details,
+                                },
+                            )
+                        except Exception:
+                            pass
+
                         if retry_count >= max_retries:
                             # Try fallback before giving up
                             if self._try_activate_fallback():
@@ -5558,9 +5592,26 @@ class AIAgent:
                             except Exception:
                                 pass  # never block the agent loop
                         
+                        # Log model call to activity logger
+                        try:
+                            activity_logger.log_model_call(
+                                model=self.model,
+                                input_tokens=canonical_usage.input_tokens,
+                                output_tokens=canonical_usage.output_tokens,
+                                duration_secs=api_duration,
+                                session_id=self.session_id,
+                                cost_usd=float(cost_result.amount_usd) if cost_result.amount_usd is not None else None,
+                                finish_reason=finish_reason,
+                                cache_read_tokens=canonical_usage.cache_read_tokens,
+                                cache_write_tokens=canonical_usage.cache_write_tokens,
+                                provider=self.provider,
+                            )
+                        except Exception:
+                            pass  # never block the agent loop
+
                         if self.verbose_logging:
                             logging.debug(f"Token usage: prompt={usage_dict['prompt_tokens']:,}, completion={usage_dict['completion_tokens']:,}, total={usage_dict['total_tokens']:,}")
-                        
+
                         # Log cache hit stats when prompt caching is active
                         if self._use_prompt_caching:
                             if self.api_mode == "anthropic_messages":
@@ -5660,6 +5711,25 @@ class AIAgent:
                         self._client_log_context(),
                         api_error,
                     )
+
+                    # Log API error to activity logger
+                    try:
+                        import traceback as _tb
+                        activity_logger.log_error(
+                            source="model_call",
+                            message=f"API call failed ({error_type}): {str(api_error)[:300]}",
+                            traceback_str=_tb.format_exc(),
+                            session_id=self.session_id,
+                            metadata={
+                                "model": self.model,
+                                "provider": self.provider,
+                                "retry_count": retry_count,
+                                "status_code": getattr(api_error, "status_code", None),
+                                "elapsed_secs": elapsed_time,
+                            },
+                        )
+                    except Exception:
+                        pass
 
                     self._vprint(f"{self.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}", force=True)
                     self._vprint(f"{self.log_prefix}   ⏱️  Time elapsed before failure: {elapsed_time:.2f}s")

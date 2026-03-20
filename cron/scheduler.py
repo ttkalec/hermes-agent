@@ -37,6 +37,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output
 
+try:
+    from agent.activity_logger import activity_logger as _activity_logger
+except ImportError:
+    _activity_logger = None
+
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
@@ -489,7 +494,10 @@ def tick(verbose: bool = True) -> int:
 
         executed = 0
         for job in due_jobs:
+            _job_start = time.time() if 'time' in dir() else __import__('time').time()
             try:
+                import time as _time_mod
+                _job_start = _time_mod.time()
                 success, output, final_response, error = run_job(job)
 
                 output_file = save_job_output(job["id"], output)
@@ -505,8 +513,12 @@ def tick(verbose: bool = True) -> int:
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     should_deliver = False
 
+                delivered_to = None
                 if should_deliver:
                     try:
+                        target = _resolve_delivery_target(job)
+                        if target:
+                            delivered_to = f"{target['platform']}:{target['chat_id']}"
                         _deliver_result(job, deliver_content)
                     except Exception as de:
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
@@ -514,9 +526,37 @@ def tick(verbose: bool = True) -> int:
                 mark_job_run(job["id"], success, error)
                 executed += 1
 
+                # Log cron job to activity logger
+                if _activity_logger:
+                    try:
+                        _activity_logger.log_cron_job(
+                            job_id=job["id"],
+                            job_name=job.get("name", job["id"]),
+                            success=success,
+                            duration_secs=_time_mod.time() - _job_start,
+                            error_message=error,
+                            delivered_to=delivered_to,
+                            output_preview=final_response[:500] if final_response else None,
+                        )
+                    except Exception:
+                        pass
+
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
                 mark_job_run(job["id"], False, str(e))
+                # Log cron job failure to activity logger
+                if _activity_logger:
+                    try:
+                        import time as _time_mod2
+                        _activity_logger.log_cron_job(
+                            job_id=job["id"],
+                            job_name=job.get("name", job["id"]),
+                            success=False,
+                            duration_secs=_time_mod2.time() - _job_start,
+                            error_message=str(e),
+                        )
+                    except Exception:
+                        pass
 
         return executed
     finally:

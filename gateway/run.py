@@ -29,6 +29,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List
 
+try:
+    from agent.activity_logger import activity_logger as _activity_logger
+except ImportError:
+    _activity_logger = None
+
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
 # Must run BEFORE any HTTP library (discord, aiohttp, etc.) is imported.
@@ -953,6 +958,16 @@ class GatewayRunner:
         
         if connected_count > 0:
             logger.info("Gateway running with %s platform(s)", connected_count)
+            # Log gateway startup to activity logger
+            if _activity_logger:
+                try:
+                    _activity_logger.log_event(
+                        source="gateway",
+                        message=f"Gateway started with {connected_count} platform(s): {', '.join(p.value for p in self.adapters.keys())}",
+                        metadata={"platforms": [p.value for p in self.adapters.keys()], "connected_count": connected_count},
+                    )
+                except Exception:
+                    pass
         
         # Build initial channel directory for send_message name resolution
         try:
@@ -985,6 +1000,12 @@ class GatewayRunner:
         except Exception as e:
             logger.error("Recovered watcher setup error: %s", e)
 
+        # Start inter-agent listener (if configured)
+        agent_name = os.getenv("HERMES_AGENT_NAME")
+        agent_port = os.getenv("HERMES_AGENT_PORT")
+        if agent_name and agent_port:
+            await self._start_agent_listener(agent_name, int(agent_port))
+
         # Start background session expiry watcher for proactive memory flushing
         asyncio.create_task(self._session_expiry_watcher())
 
@@ -992,6 +1013,142 @@ class GatewayRunner:
         
         return True
     
+    # ------------------------------------------------------------------
+    # Inter-agent HTTP listener
+    # ------------------------------------------------------------------
+
+    async def _start_agent_listener(self, agent_name: str, port: int):
+        """Start a lightweight aiohttp server for inter-agent communication."""
+        try:
+            from aiohttp import web
+        except ImportError:
+            logger.warning("aiohttp not installed — inter-agent listener disabled")
+            return
+
+        self._agent_name = agent_name
+        self._agent_lock = asyncio.Lock()
+        self._agent_app = web.Application()
+        self._agent_app.router.add_get("/agent/health", self._agent_health)
+        self._agent_app.router.add_post("/agent/ask", self._agent_ask)
+
+        runner = web.AppRunner(self._agent_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", port)
+        await site.start()
+        self._agent_runner = runner
+        logger.info("Inter-agent listener started: %s on port %d", agent_name, port)
+
+    async def _stop_agent_listener(self):
+        """Stop the inter-agent HTTP listener if running."""
+        runner = getattr(self, "_agent_runner", None)
+        if runner:
+            await runner.cleanup()
+            self._agent_runner = None
+            logger.info("Inter-agent listener stopped")
+
+    async def _agent_health(self, request):
+        """GET /agent/health — simple health check."""
+        from aiohttp import web
+        return web.json_response({
+            "agent": getattr(self, "_agent_name", "unknown"),
+            "status": "ready",
+        })
+
+    async def _agent_ask(self, request):
+        """POST /agent/ask — receive a message, run an agent, return response."""
+        from aiohttp import web
+
+        lock = getattr(self, "_agent_lock", None)
+        if lock and lock.locked():
+            return web.json_response(
+                {"error": "Agent is busy processing another request"},
+                status=503,
+            )
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        message = body.get("message", "")
+        from_agent = body.get("from_agent", "unknown")
+        if not message:
+            return web.json_response({"error": "Missing 'message' field"}, status=400)
+
+        agent_name = getattr(self, "_agent_name", "unknown")
+
+        async with lock:
+            import time as _time
+            t0 = _time.monotonic()
+            try:
+                loop = asyncio.get_event_loop()
+
+                def _run():
+                    from run_agent import AIAgent
+
+                    runtime_kwargs = _resolve_runtime_agent_kwargs()
+                    model = _resolve_gateway_model()
+                    max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
+
+                    # Load SOUL.md as ephemeral system prompt
+                    soul_prompt = None
+                    soul_path = _hermes_home / "SOUL.md"
+                    if soul_path.exists():
+                        try:
+                            soul_prompt = soul_path.read_text(encoding="utf-8").strip()
+                        except Exception:
+                            pass
+
+                    # Add context about the requesting agent
+                    context = f"[This request comes from agent '{from_agent}' via inter-agent communication.]"
+                    if soul_prompt:
+                        soul_prompt = soul_prompt + "\n\n" + context
+                    else:
+                        soul_prompt = context
+
+                    agent = AIAgent(
+                        model=model,
+                        **runtime_kwargs,
+                        max_iterations=max_iterations,
+                        quiet_mode=True,
+                        verbose_logging=False,
+                        ephemeral_system_prompt=soul_prompt,
+                        platform="agent_comm",
+                    )
+                    result = agent.run_conversation(
+                        user_message=message,
+                        conversation_history=[],
+                    )
+                    return result
+
+                result = await loop.run_in_executor(None, _run)
+                duration = _time.monotonic() - t0
+
+                # Extract text response from result
+                response_text = ""
+                if isinstance(result, dict):
+                    response_text = result.get("response", result.get("content", str(result)))
+                elif isinstance(result, str):
+                    response_text = result
+                else:
+                    response_text = str(result)
+
+                return web.json_response({
+                    "response": response_text,
+                    "agent": agent_name,
+                    "status": "completed",
+                    "duration_seconds": round(duration, 1),
+                })
+            except Exception as e:
+                duration = _time.monotonic() - t0
+                logger.error("Inter-agent request failed: %s", e)
+                return web.json_response({
+                    "error": str(e),
+                    "agent": agent_name,
+                    "status": "error",
+                    "duration_seconds": round(duration, 1),
+                }, status=500)
+
     async def _session_expiry_watcher(self, interval: int = 300):
         """Background task that proactively flushes memories for expired sessions.
         
@@ -1034,6 +1191,9 @@ class GatewayRunner:
         """Stop the gateway and disconnect all adapters."""
         logger.info("Stopping gateway...")
         self._running = False
+
+        # Stop inter-agent listener if running
+        await self._stop_agent_listener()
 
         for session_key, agent in list(self._running_agents.items()):
             try:
@@ -1540,6 +1700,17 @@ class GatewayRunner:
                 "session_id": session_entry.session_id,
                 "session_key": session_key,
             })
+            # Log session start to activity logger
+            if _activity_logger:
+                try:
+                    _activity_logger.log_session_event(
+                        event_name="start",
+                        session_id=session_entry.session_id,
+                        platform=source.platform.value if source.platform else None,
+                        user_id=source.user_id,
+                    )
+                except Exception:
+                    pass
         
         # Build session context
         context = build_session_context(source, self.config, session_entry)
@@ -4679,9 +4850,34 @@ class GatewayRunner:
         interrupt_monitor = asyncio.create_task(monitor_for_interrupt())
         
         try:
-            # Run in thread pool to not block
+            # Run in thread pool to not block.
+            # Apply a hard timeout to prevent hung LLM calls from blocking
+            # the message handler indefinitely.  Reads HERMES_AGENT_TIMEOUT
+            # (seconds) from env, defaulting to 10 minutes.
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, run_sync)
+            _agent_timeout = int(os.getenv("HERMES_AGENT_TIMEOUT", "600"))
+            try:
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(None, run_sync),
+                    timeout=_agent_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Agent timed out after %ds for session %s — interrupting",
+                    _agent_timeout, session_key,
+                )
+                _agent = agent_holder[0]
+                if _agent:
+                    _agent.interrupt("Agent timed out")
+                response = {
+                    "final_response": f"⚠️ I took too long (>{_agent_timeout}s) and was stopped. Please try again — maybe with a simpler request.",
+                    "messages": [],
+                    "api_calls": 0,
+                    "tools": [],
+                    "failed": True,
+                    "error": f"agent_timeout ({_agent_timeout}s)",
+                }
+                result_holder[0] = response
 
             # Track fallback model state: if the agent switched to a
             # fallback model during this run, persist it so /model shows

@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -990,13 +990,13 @@ class TelegramAdapter(BasePlatformAdapter):
             first_ts = event.trace.get("received_at")
             batch_wait_ms = None
             if first_ts:
-                batch_wait_ms = round((datetime.now() - first_ts).total_seconds() * 1000)
+                batch_wait_ms = round((datetime.now(timezone.utc) - first_ts).total_seconds() * 1000)
             logger.info(
                 "[Telegram] Flushing text batch %s (%d chars, batch_wait_ms=%s)",
                 key, len(event.text or ""), batch_wait_ms,
             )
             if "batch_flushed_at" not in event.trace:
-                event.trace["batch_flushed_at"] = datetime.now()
+                event.trace["batch_flushed_at"] = datetime.now(timezone.utc)
             if batch_wait_ms is not None:
                 event.trace["batch_wait_ms"] = batch_wait_ms
             event.turn_phase = "queued"

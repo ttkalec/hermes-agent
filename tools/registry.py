@@ -118,18 +118,64 @@ class ToolRegistry:
         * Async handlers are bridged automatically via ``_run_async()``.
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
+        * Every call is logged to the activity logger (SQLite + JSONL).
         """
+        import time as _time
         entry = self._tools.get(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+
+        _start = _time.time()
         try:
             if entry.is_async:
                 from model_tools import _run_async
-                return _run_async(entry.handler(args, **kwargs))
-            return entry.handler(args, **kwargs)
+                result = _run_async(entry.handler(args, **kwargs))
+            else:
+                result = entry.handler(args, **kwargs)
+
+            _duration = _time.time() - _start
+            # Log successful tool call
+            try:
+                from agent.activity_logger import activity_logger
+                # Detect error results
+                is_error = False
+                if isinstance(result, str):
+                    try:
+                        parsed = json.loads(result)
+                        is_error = isinstance(parsed, dict) and "error" in parsed
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                activity_logger.log_tool_call(
+                    tool_name=name,
+                    args=args,
+                    result=result,
+                    duration_secs=_duration,
+                    success=not is_error,
+                    error_message=result[:200] if is_error else None,
+                )
+            except Exception:
+                pass  # never block tool execution for logging
+
+            return result
         except Exception as e:
+            _duration = _time.time() - _start
             logger.exception("Tool %s dispatch error: %s", name, e)
-            return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
+            error_result = json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
+            # Log failed tool call
+            try:
+                from agent.activity_logger import activity_logger
+                import traceback
+                activity_logger.log_tool_call(
+                    tool_name=name,
+                    args=args,
+                    result=error_result,
+                    duration_secs=_duration,
+                    success=False,
+                    error_message=f"{type(e).__name__}: {e}",
+                )
+            except Exception:
+                pass
+            return error_result
 
     # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)

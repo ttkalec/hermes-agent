@@ -367,8 +367,9 @@ def print_systemd_linger_guidance() -> None:
         print("  If you want the gateway user service to survive logout, run:")
         print("  sudo loginctl enable-linger $USER")
 
-def get_launchd_plist_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / "ai.hermes.gateway.plist"
+def get_launchd_plist_path(agent_name: str = None) -> Path:
+    label = f"ai.hermes.agent.{agent_name}" if agent_name else "ai.hermes.gateway"
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
 def get_python_path() -> str:
     if is_windows():
@@ -722,19 +723,56 @@ def systemd_status(deep: bool = False, system: bool = False):
 # Launchd (macOS)
 # =============================================================================
 
-def generate_launchd_plist() -> str:
+def generate_launchd_plist(
+    agent_name: str = None,
+    hermes_home: str = None,
+    agent_port: int = None,
+    agents_registry: str = None,
+) -> str:
     python_path = get_python_path()
     working_dir = str(PROJECT_ROOT)
-    log_dir = get_hermes_home() / "logs"
+
+    if hermes_home:
+        log_dir = Path(hermes_home) / "logs"
+    else:
+        log_dir = get_hermes_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    if agent_name:
+        label = f"ai.hermes.agent.{agent_name}"
+    else:
+        label = "ai.hermes.gateway"
+
+    # Build environment variables section for agent mode
+    env_section = ""
+    if agent_name:
+        env_vars = {
+            "HERMES_HOME": hermes_home or str(get_hermes_home()),
+            "HERMES_AGENT_NAME": agent_name,
+        }
+        if agent_port:
+            env_vars["HERMES_AGENT_PORT"] = str(agent_port)
+        if agents_registry:
+            env_vars["HERMES_AGENTS_REGISTRY"] = agents_registry
+
+        env_entries = ""
+        for k, v in env_vars.items():
+            env_entries += f"""
+            <key>{k}</key>
+            <string>{v}</string>"""
+        env_section = f"""
+    <key>EnvironmentVariables</key>
+    <dict>{env_entries}
+    </dict>
+    """
+
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>ai.hermes.gateway</string>
-    
+    <string>{label}</string>
+
     <key>ProgramArguments</key>
     <array>
         <string>{python_path}</string>
@@ -744,22 +782,22 @@ def generate_launchd_plist() -> str:
         <string>run</string>
         <string>--replace</string>
     </array>
-    
+
     <key>WorkingDirectory</key>
     <string>{working_dir}</string>
-    
+
     <key>RunAtLoad</key>
     <true/>
-    
+
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>
         <false/>
     </dict>
-    
+    {env_section}
     <key>StandardOutPath</key>
     <string>{log_dir}/gateway.log</string>
-    
+
     <key>StandardErrorPath</key>
     <string>{log_dir}/gateway.error.log</string>
 </dict>
