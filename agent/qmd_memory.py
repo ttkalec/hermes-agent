@@ -9,14 +9,17 @@ import subprocess
 import threading
 import time
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_state import SessionDB
+from agent.session_transcript import summarize_assistant_tool_calls, summarize_tool_content
 
 logger = logging.getLogger(__name__)
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_QMD_STRUCTURED_QUERY_RE = re.compile(r"^(?:lex|vec|hyde|intent|expand):\s*", re.IGNORECASE)
 
 
 def _strip_ansi(text: str) -> str:
@@ -100,6 +103,34 @@ class QmdMemoryManager:
     def enabled(self) -> bool:
         return True
 
+    @cached_property
+    def _resolved_command(self) -> List[str]:
+        cmd_path = Path(self.command).expanduser()
+        if not cmd_path.is_absolute() or not cmd_path.exists():
+            return [self.command]
+
+        try:
+            source = cmd_path.resolve()
+        except Exception:
+            return [str(cmd_path)]
+
+        package_dir = source.parent.parent
+        script_path = package_dir / "dist" / "cli" / "qmd.js"
+        if source.name != "qmd" or source.parent.name != "bin" or not script_path.exists():
+            return [str(cmd_path)]
+
+        uses_bun = any((package_dir / lock_name).exists() for lock_name in ("bun.lock", "bun.lockb")) or bool(os.environ.get("BUN_INSTALL"))
+        if uses_bun:
+            bun_path = shutil.which("bun")
+            if bun_path:
+                return [bun_path, str(script_path)]
+            return [str(cmd_path)]
+
+        node_path = cmd_path.parent / "node"
+        if node_path.exists():
+            return [str(node_path), str(script_path)]
+        return [str(cmd_path)]
+
     def _env(self) -> Dict[str, str]:
         env = os.environ.copy()
         env["XDG_CONFIG_HOME"] = str(self.xdg_config_home)
@@ -116,7 +147,7 @@ class QmdMemoryManager:
         self.xdg_config_home.mkdir(parents=True, exist_ok=True)
         self.xdg_cache_home.mkdir(parents=True, exist_ok=True)
         completed = subprocess.run(
-            [self.command, *args],
+            [*self._resolved_command, *args],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -200,13 +231,31 @@ class QmdMemoryManager:
             lines.append("## Transcript")
             lines.append("")
             for msg in session.get("messages") or []:
-                role = str(msg.get("role") or "unknown").title()
+                role_key = str(msg.get("role") or "unknown").strip().lower()
+                role = role_key.title() or "Unknown"
                 content = str(msg.get("content") or "").strip()
-                if not content:
+
+                rendered_blocks: List[str] = []
+                if role_key == "tool":
+                    summary = summarize_tool_content(msg.get("tool_name"), content)
+                    if summary:
+                        rendered_blocks.append(summary)
+                elif role_key == "assistant":
+                    tool_summary = summarize_assistant_tool_calls(msg.get("tool_calls"))
+                    if tool_summary:
+                        rendered_blocks.append(f"[{tool_summary}]")
+                    if content:
+                        rendered_blocks.append(content)
+                else:
+                    if content:
+                        rendered_blocks.append(content)
+
+                if not rendered_blocks:
                     continue
+
                 lines.append(f"### {role}")
                 lines.append("")
-                lines.append(content)
+                lines.extend(rendered_blocks)
                 lines.append("")
             text = "\n".join(lines).rstrip() + "\n"
             previous = out_path.read_text(encoding="utf-8") if out_path.exists() else None
@@ -296,8 +345,21 @@ class QmdMemoryManager:
             logger.warning("QMD memory sync failed: %s", exc)
             return False
 
+    def _prepare_search_query(self, query: str) -> str:
+        query = str(query or "")
+        if self.search_mode != "query":
+            return query
+
+        lines = [line.strip() for line in query.splitlines() if line.strip()]
+        if len(lines) <= 1:
+            return lines[0] if lines else ""
+        if all(_QMD_STRUCTURED_QUERY_RE.match(line) for line in lines):
+            return "\n".join(lines)
+        return re.sub(r"\s+", " ", query).strip()
+
     def _search_collection(self, query: str, collection: str, limit: int) -> List[Dict[str, Any]]:
-        args = [self.search_mode, query, "--json", "-n", str(limit), "-c", collection]
+        prepared_query = self._prepare_search_query(query)
+        args = [self.search_mode, prepared_query, "--json", "-n", str(limit), "-c", collection]
         result = self._run(args, timeout=900 if self.search_mode == "query" else 240)
         payload = _extract_json_payload(result.stdout)
         if isinstance(payload, list):

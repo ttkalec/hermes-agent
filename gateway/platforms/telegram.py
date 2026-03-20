@@ -11,6 +11,8 @@ import asyncio
 import logging
 import os
 import re
+import time
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -121,8 +123,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # Buffer rapid text messages so Telegram client-side splits of long
         # messages are aggregated into a single MessageEvent.
         self._text_batch_delay_seconds = float(os.getenv("HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS", "0.6"))
+        self._text_batch_max_wait_seconds = float(os.getenv("HERMES_TELEGRAM_TEXT_BATCH_MAX_WAIT_SECONDS", "2.0"))
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
+        self._text_batch_first_received: Dict[str, float] = {}  # key → monotonic time of first msg
         self._token_lock_identity: Optional[str] = None
         self._polling_error_task: Optional[asyncio.Task] = None
 
@@ -719,8 +723,13 @@ class TelegramAdapter(BasePlatformAdapter):
                     action="typing",
                     message_thread_id=int(_typing_thread) if _typing_thread else None,
                 )
+                self._record_typing_success(chat_id)
+                event = metadata.get("_turn_event") if metadata else None
+                if event and "first_typing_sent_at" not in event.trace:
+                    self._mark_turn_timestamp(event, "first_typing_sent_at")
             except Exception as e:
-                # Typing failures are non-fatal; log at debug level only.
+                self._record_typing_failure(chat_id, e, metadata=metadata)
+                # Typing failures are non-fatal; keep the detailed traceback at debug.
                 logger.debug(
                     "[%s] Failed to send Telegram typing indicator: %s",
                     self.name,
@@ -917,11 +926,16 @@ class TelegramAdapter(BasePlatformAdapter):
         they arrive within a few hundred milliseconds.  This method
         concatenates them and waits for a short quiet period before
         dispatching the combined message.
+
+        A hard cap (``_text_batch_max_wait_seconds``) ensures the batch
+        always flushes within a bounded time from the first message,
+        even when new chunks keep arriving and resetting the debounce.
         """
         key = self._text_batch_key(event)
         existing = self._pending_text_batches.get(key)
         if existing is None:
             self._pending_text_batches[key] = event
+            self._text_batch_first_received[key] = time.monotonic()
         else:
             # Append text from the follow-up chunk
             if event.text:
@@ -931,26 +945,61 @@ class TelegramAdapter(BasePlatformAdapter):
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)
 
-        # Cancel any pending flush and restart the timer
+        # Compute how long we can still wait before hitting the hard cap.
+        first_received = self._text_batch_first_received.get(key, time.monotonic())
+        elapsed = time.monotonic() - first_received
+        remaining = max(0, self._text_batch_max_wait_seconds - elapsed)
+
+        if remaining <= 0:
+            # Hard cap reached — flush immediately (no more debounce).
+            prior_task = self._pending_text_batch_tasks.get(key)
+            if prior_task and not prior_task.done():
+                prior_task.cancel()
+            self._pending_text_batch_tasks[key] = asyncio.create_task(
+                self._flush_text_batch(key, delay_override=0)
+            )
+            return
+
+        # Normal debounce: cancel any pending flush and restart the timer,
+        # but never wait longer than the remaining time to the hard cap.
+        delay = min(self._text_batch_delay_seconds, remaining)
         prior_task = self._pending_text_batch_tasks.get(key)
         if prior_task and not prior_task.done():
             prior_task.cancel()
         self._pending_text_batch_tasks[key] = asyncio.create_task(
-            self._flush_text_batch(key)
+            self._flush_text_batch(key, delay_override=delay)
         )
 
-    async def _flush_text_batch(self, key: str) -> None:
-        """Wait for the quiet period then dispatch the aggregated text."""
+    async def _flush_text_batch(self, key: str, *, delay_override: float | None = None) -> None:
+        """Wait for the quiet period then dispatch the aggregated text.
+
+        Args:
+            delay_override: If provided, sleep this many seconds instead of the
+                default ``_text_batch_delay_seconds``.  Used by the hard-cap
+                logic to flush immediately (0) or with a shortened window.
+        """
         current_task = asyncio.current_task()
         try:
-            await asyncio.sleep(self._text_batch_delay_seconds)
+            delay = delay_override if delay_override is not None else self._text_batch_delay_seconds
+            if delay > 0:
+                await asyncio.sleep(delay)
             event = self._pending_text_batches.pop(key, None)
+            self._text_batch_first_received.pop(key, None)
             if not event:
                 return
+            first_ts = event.trace.get("received_at")
+            batch_wait_ms = None
+            if first_ts:
+                batch_wait_ms = round((datetime.now() - first_ts).total_seconds() * 1000)
             logger.info(
-                "[Telegram] Flushing text batch %s (%d chars)",
-                key, len(event.text or ""),
+                "[Telegram] Flushing text batch %s (%d chars, batch_wait_ms=%s)",
+                key, len(event.text or ""), batch_wait_ms,
             )
+            if "batch_flushed_at" not in event.trace:
+                event.trace["batch_flushed_at"] = datetime.now()
+            if batch_wait_ms is not None:
+                event.trace["batch_wait_ms"] = batch_wait_ms
+            event.turn_phase = "queued"
             await self.handle_message(event)
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:

@@ -23,8 +23,10 @@ import logging
 from typing import Dict, Any, List, Optional, Union
 
 from agent.auxiliary_client import async_call_llm
+from agent.session_transcript import summarize_assistant_tool_calls, summarize_tool_content
+
 MAX_SESSION_CHARS = 100_000
-MAX_SUMMARY_TOKENS = 10000
+MAX_SUMMARY_TOKENS = 10_000
 
 
 def _format_timestamp(ts: Union[int, float, str, None]) -> str:
@@ -61,28 +63,19 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
         content = msg.get("content") or ""
         tool_name = msg.get("tool_name")
 
-        if role == "TOOL" and tool_name:
-            # Truncate long tool outputs
-            if len(content) > 500:
-                content = content[:250] + "\n...[truncated]...\n" + content[-250:]
-            parts.append(f"[TOOL:{tool_name}]: {content}")
+        if role == "TOOL":
+            summary = summarize_tool_content(tool_name, content)
+            if summary:
+                parts.append(f"[TOOL:{tool_name or 'tool'}]: {summary}")
         elif role == "ASSISTANT":
-            # Include tool call names if present
-            tool_calls = msg.get("tool_calls")
-            if tool_calls and isinstance(tool_calls, list):
-                tc_names = []
-                for tc in tool_calls:
-                    if isinstance(tc, dict):
-                        name = tc.get("name") or tc.get("function", {}).get("name", "?")
-                        tc_names.append(name)
-                if tc_names:
-                    parts.append(f"[ASSISTANT]: [Called: {', '.join(tc_names)}]")
-                if content:
-                    parts.append(f"[ASSISTANT]: {content}")
-            else:
+            tool_summary = summarize_assistant_tool_calls(msg.get("tool_calls"))
+            if tool_summary:
+                parts.append(f"[ASSISTANT]: [{tool_summary}]")
+            if content:
                 parts.append(f"[ASSISTANT]: {content}")
         else:
-            parts.append(f"[{role}]: {content}")
+            if content:
+                parts.append(f"[{role}]: {content}")
 
     return "\n\n".join(parts)
 
@@ -164,7 +157,7 @@ async def _summarize_session(
             )
             return response.choices[0].message.content.strip()
         except RuntimeError:
-            logging.warning("No auxiliary model available for session summarization")
+
             return None
         except Exception as e:
             if attempt < max_retries - 1:

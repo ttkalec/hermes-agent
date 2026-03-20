@@ -761,6 +761,7 @@ class AIAgent:
                     self._memory_store = MemoryStore(
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
+                        learnings_char_limit=mem_config.get("learnings_char_limit", 12000),
                     )
                     self._memory_store.load_from_disk()
                     if self._memory_enabled and self._memory_backend == "qmd":

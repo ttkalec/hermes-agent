@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 import uuid
 from abc import ABC, abstractmethod
 
@@ -25,6 +26,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
+from gateway.turn_trace import ensure_turn_metadata, format_turn_snapshot, record_timestamp, set_phase, slow_turn_warning_message
 from hermes_cli.config import get_hermes_home
 
 
@@ -298,6 +300,14 @@ class MessageEvent:
     
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
+
+    # Observability / tracing
+    correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    turn_phase: str = "received"
+    trace: Dict[str, datetime] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        ensure_turn_metadata(self)
     
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
@@ -363,6 +373,8 @@ class BasePlatformAdapter(ABC):
         self._background_tasks: set[asyncio.Task] = set()
         # Chats where auto-TTS on voice input is disabled (set by /voice off)
         self._auto_tts_disabled_chats: set = set()
+        # Consecutive typing indicator failures per chat for warning escalation.
+        self._typing_failure_counts: Dict[str, int] = {}
 
     @property
     def has_fatal_error(self) -> bool:
@@ -437,6 +449,83 @@ class BasePlatformAdapter(ABC):
     def is_connected(self) -> bool:
         """Check if adapter is currently connected."""
         return self._running
+
+    def _log_turn_event(self, event: MessageEvent, message: str, level: int = logging.INFO, **fields: Any) -> None:
+        ensure_turn_metadata(event)
+        details = []
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if isinstance(value, datetime):
+                rendered = value.isoformat()
+            else:
+                rendered = str(value)
+            details.append(f"{key}={rendered}")
+        suffix = f" {' '.join(details)}" if details else ""
+        logger.log(level, "[%s][turn:%s] %s%s", self.name, event.correlation_id, message, suffix)
+
+    def _mark_turn_timestamp(
+        self,
+        event: MessageEvent,
+        field_name: str,
+        *,
+        when: Optional[datetime] = None,
+        level: int = logging.INFO,
+        **fields: Any,
+    ) -> datetime:
+        timestamp = record_timestamp(event, field_name, when=when)
+        payload = {field_name: timestamp, **fields}
+        self._log_turn_event(event, field_name, level=level, **payload)
+        return timestamp
+
+    def _set_turn_phase(self, event: MessageEvent, phase: str) -> None:
+        set_phase(event, phase)
+
+    def _typing_warning_threshold(self) -> int:
+        try:
+            return max(1, int(os.getenv("HERMES_TYPING_WARNING_THRESHOLD", "3")))
+        except Exception:
+            return 3
+
+    def _record_typing_success(self, chat_id: str) -> None:
+        self._typing_failure_counts[chat_id] = 0
+
+    def _record_typing_failure(self, chat_id: str, error: Exception, metadata: Optional[Dict[str, Any]] = None) -> None:
+        count = self._typing_failure_counts.get(chat_id, 0) + 1
+        self._typing_failure_counts[chat_id] = count
+        threshold = self._typing_warning_threshold()
+        if count < threshold or (count % threshold) != 0:
+            return
+        turn_id = None
+        if metadata:
+            turn_id = metadata.get("turn_correlation_id")
+        prefix = f"[{self.name}][turn:{turn_id}]" if turn_id else f"[{self.name}]"
+        logger.warning(
+            "%s typing indicator failures=%s chat_id=%s last_error=%s",
+            prefix,
+            count,
+            chat_id,
+            error,
+        )
+
+    async def _monitor_slow_turn(self, event: MessageEvent, thresholds: tuple[int, ...] = (10, 30, 60)) -> None:
+        ensure_turn_metadata(event)
+        started = time.monotonic()
+        try:
+            for threshold in thresholds:
+                remaining = threshold - (time.monotonic() - started)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                if getattr(event, "turn_phase", None) == "complete":
+                    return
+                self._log_turn_event(
+                    event,
+                    slow_turn_warning_message(event, elapsed_seconds=threshold),
+                    level=logging.WARNING,
+                    snapshot=format_turn_snapshot(event),
+                )
+        except asyncio.CancelledError:
+            return
     
     def set_message_handler(self, handler: MessageHandler) -> None:
         """
@@ -822,6 +911,19 @@ class BasePlatformAdapter(ABC):
         """
         if not self._message_handler:
             return
+
+        ensure_turn_metadata(event)
+        self._log_turn_event(
+            event,
+            "received",
+            received_at=event.trace.get("received_at"),
+            chat_id=event.source.chat_id if event.source else None,
+            message_id=event.message_id,
+            message_type=event.message_type.value if event.message_type else None,
+        )
+        if "batch_flushed_at" not in event.trace:
+            self._mark_turn_timestamp(event, "batch_flushed_at")
+        self._set_turn_phase(event, "queued")
         
         session_key = build_session_key(
             event.source,
@@ -889,18 +991,78 @@ class BasePlatformAdapter(ABC):
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         """Background task that actually processes the message."""
+        ensure_turn_metadata(event)
+        self._set_turn_phase(event, "handling_message")
+
         # Create interrupt event for this session
         interrupt_event = asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
-        
+
         # Start continuous typing indicator (refreshes every 2 seconds)
         _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
-        typing_task = asyncio.create_task(self._keep_typing(event.source.chat_id, metadata=_thread_metadata))
-        
+        _typing_metadata = dict(_thread_metadata or {})
+        _typing_metadata["_turn_event"] = event
+        _typing_metadata["turn_correlation_id"] = event.correlation_id
+        typing_task = asyncio.create_task(self._keep_typing(event.source.chat_id, metadata=_typing_metadata))
+        slow_turn_task = asyncio.create_task(self._monitor_slow_turn(event))
+
+        # --- Early placeholder for Telegram --------------------------------
+        # Send a lightweight "Thinking…" message after a short grace period
+        # so the user sees an immediate ack on long turns.  If the handler
+        # returns before the grace period, the placeholder is never sent.
+        _placeholder_msg_id = [None]
+        _placeholder_task = None
+        _placeholder_grace = float(os.getenv("HERMES_TELEGRAM_PLACEHOLDER_GRACE_SECONDS", "1.5"))
+
+        if (
+            self.platform == Platform.TELEGRAM
+            and event.message_type not in (MessageType.COMMAND,)
+        ):
+            async def _send_early_placeholder():
+                try:
+                    await asyncio.sleep(_placeholder_grace)
+                    result = await self.send(
+                        chat_id=event.source.chat_id,
+                        content="💭",
+                        metadata=_thread_metadata,
+                    )
+                    if result.success:
+                        _placeholder_msg_id[0] = result.message_id
+                        record_timestamp(event, "placeholder_sent_at")
+                        logger.info(
+                            "[%s] Sent early placeholder (msg_id=%s) for %s",
+                            self.name, result.message_id, event.source.chat_id,
+                        )
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug("[%s] Early placeholder failed: %s", self.name, e)
+
+            _placeholder_task = asyncio.create_task(_send_early_placeholder())
+        # -------------------------------------------------------------------
+
         try:
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
-            
+
+            # Cancel placeholder if the handler returned quickly enough
+            if _placeholder_task and not _placeholder_task.done():
+                _placeholder_task.cancel()
+
+            # Record first-visible-response timestamp
+            record_timestamp(event, "first_visible_response_at")
+
+            # Log turn latency summary
+            _t = event.trace
+            if "received_at" in _t and "first_visible_response_at" in _t:
+                _total_ms = round((_t["first_visible_response_at"] - _t["received_at"]).total_seconds() * 1000)
+                _batch_ms = _t.get("batch_wait_ms", "n/a")
+                _placeholder_at = "yes" if "placeholder_sent_at" in _t else "no"
+                logger.info(
+                    "[%s] Turn latency: total_to_response=%dms, batch_wait=%s, placeholder=%s, chat=%s",
+                    self.name, _total_ms, _batch_ms, _placeholder_at, event.source.chat_id,
+                )
+
             # Send response if any
             if not response:
                 logger.warning("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
@@ -1100,8 +1262,10 @@ class BasePlatformAdapter(ABC):
             import traceback
             traceback.print_exc()
         finally:
-            # Stop typing indicator
+            # Stop typing indicator and placeholder task
             typing_task.cancel()
+            if _placeholder_task and not _placeholder_task.done():
+                _placeholder_task.cancel()
             try:
                 await typing_task
             except asyncio.CancelledError:

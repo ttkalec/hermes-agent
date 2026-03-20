@@ -2,16 +2,19 @@
 """
 Memory Tool Module - Persistent Curated Memory
 
-Provides bounded, file-backed memory that persists across sessions. Two stores:
+Provides bounded, file-backed memory that persists across sessions. Three stores:
   - MEMORY.md: agent's personal notes and observations (environment facts, project
     conventions, tool quirks, things learned)
   - USER.md: what the agent knows about the user (preferences, communication style,
     expectations, workflow habits)
+  - learnings.md: medium-term workflow learnings and recurring patterns that should
+    be indexed by QMD but not injected wholesale into the system prompt
 
-Both are injected into the system prompt as a frozen snapshot at session start.
-Mid-session writes update files on disk immediately (durable) but do NOT change
-the system prompt -- this preserves the prefix cache for the entire session.
-The snapshot refreshes on the next session start.
+MEMORY.md and USER.md are injected into the system prompt as a frozen snapshot at
+session start. learnings.md is persisted and indexed for QMD retrieval, but is not
+injected wholesale into the system prompt. Mid-session writes update files on disk
+immediately (durable) but do NOT change the system prompt -- this preserves the
+prefix cache for the entire session. The snapshot refreshes on the next session start.
 
 Entry delimiter: § (section sign). Entries can be multiline.
 Character limits (not tokens) because char counts are model-independent.
@@ -97,13 +100,15 @@ class MemoryStore:
         Tool responses always reflect this live state.
     """
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375, learnings_char_limit: int = 12000):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
+        self.learnings_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.learnings_char_limit = learnings_char_limit
         # Frozen snapshot for system prompt -- set once at load_from_disk()
-        self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": "", "learnings": ""}
 
     def load_from_disk(self):
         """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
@@ -111,15 +116,18 @@ class MemoryStore:
 
         self.memory_entries = self._read_file(MEMORY_DIR / "MEMORY.md")
         self.user_entries = self._read_file(MEMORY_DIR / "USER.md")
+        self.learnings_entries = self._read_file(MEMORY_DIR / "learnings.md")
 
         # Deduplicate entries (preserves order, keeps first occurrence)
         self.memory_entries = list(dict.fromkeys(self.memory_entries))
         self.user_entries = list(dict.fromkeys(self.user_entries))
+        self.learnings_entries = list(dict.fromkeys(self.learnings_entries))
 
         # Capture frozen snapshot for system prompt injection
         self._system_prompt_snapshot = {
             "memory": self._render_block("memory", self.memory_entries),
             "user": self._render_block("user", self.user_entries),
+            "learnings": "",
         }
 
     @staticmethod
@@ -144,6 +152,8 @@ class MemoryStore:
     def _path_for(target: str) -> Path:
         if target == "user":
             return MEMORY_DIR / "USER.md"
+        if target == "learnings":
+            return MEMORY_DIR / "learnings.md"
         return MEMORY_DIR / "MEMORY.md"
 
     def _reload_target(self, target: str):
@@ -163,11 +173,15 @@ class MemoryStore:
     def _entries_for(self, target: str) -> List[str]:
         if target == "user":
             return self.user_entries
+        if target == "learnings":
+            return self.learnings_entries
         return self.memory_entries
 
     def _set_entries(self, target: str, entries: List[str]):
         if target == "user":
             self.user_entries = entries
+        elif target == "learnings":
+            self.learnings_entries = entries
         else:
             self.memory_entries = entries
 
@@ -180,6 +194,8 @@ class MemoryStore:
     def _char_limit(self, target: str) -> int:
         if target == "user":
             return self.user_char_limit
+        if target == "learnings":
+            return self.learnings_char_limit
         return self.memory_char_limit
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
@@ -363,6 +379,8 @@ class MemoryStore:
 
         if target == "user":
             header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+        elif target == "learnings":
+            header = f"LEARNINGS (QMD-indexed, not prompt-injected) [{pct}% — {current:,}/{limit:,} chars]"
         else:
             header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
 
@@ -438,8 +456,8 @@ def memory_tool(
     if store is None:
         return json.dumps({"success": False, "error": "Memory is not available. It may be disabled in config or this environment."}, ensure_ascii=False)
 
-    if target not in ("memory", "user"):
-        return json.dumps({"success": False, "error": f"Invalid target '{target}'. Use 'memory' or 'user'."}, ensure_ascii=False)
+    if target not in ("memory", "user", "learnings"):
+        return json.dumps({"success": False, "error": f"Invalid target '{target}'. Use 'memory', 'user', or 'learnings'."}, ensure_ascii=False)
 
     if action == "add":
         if not content:
@@ -477,8 +495,9 @@ MEMORY_SCHEMA = {
     "name": "memory",
     "description": (
         "Save durable information to persistent memory that survives across sessions. "
-        "Memory is injected into future turns, so keep it compact and focused on facts "
-        "that will still matter later.\n\n"
+        "MEMORY.md and USER.md may be injected into future turns, while learnings.md is "
+        "stored for QMD retrieval without being injected wholesale. Keep all memory compact "
+        "and focused on facts that will still matter later.\n\n"
         "WHEN TO SAVE (do this proactively, don't wait to be asked):\n"
         "- User corrects you or says 'remember this' / 'don't do that again'\n"
         "- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n"
@@ -491,9 +510,10 @@ MEMORY_SCHEMA = {
         "state to memory; use session_search to recall those from past transcripts.\n"
         "If you've discovered a new way to do something, solved a problem that could be "
         "necessary later, save it as a skill with the skill tool.\n\n"
-        "TWO TARGETS:\n"
+        "MEMORY ROUTING:\n"
         "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
-        "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
+        "- 'memory': very sparse, highest-signal notes -- durable preferences, stable conventions, important environment facts\n"
+        "- 'learnings': medium-term workflow learnings and repeated patterns that should be searchable via QMD but should not bloat MEMORY.md\n\n"
         "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
         "remove (delete -- old_text identifies it).\n\n"
         "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
@@ -508,8 +528,8 @@ MEMORY_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "enum": ["memory", "user"],
-                "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
+                "enum": ["memory", "user", "learnings"],
+                "description": "Which memory store: 'memory' for sparse durable notes, 'user' for user profile, 'learnings' for QMD-indexed workflow learnings."
             },
             "content": {
                 "type": "string",

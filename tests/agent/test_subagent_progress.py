@@ -72,9 +72,15 @@ class TestPrintAbove:
 
 class TestBuildToolProgressTopic:
     def test_prefers_high_level_config_docs_and_model_labels(self):
-        assert build_tool_progress_topic("read_file", {"path": "~/.hermes/config.yaml"}) == "Checking your config"
-        assert build_tool_progress_topic("web_search", {"query": "OpenAI API docs"}) == "Searching the docs"
-        assert build_tool_progress_topic("terminal", {"command": "hermes models list"}) == "Verifying available models"
+        assert build_tool_progress_topic("read_file", {"path": "~/.hermes/config.yaml"}) == (
+            "Checking your config to verify the setting in config.yaml"
+        )
+        assert build_tool_progress_topic("web_search", {"query": "OpenAI API docs"}) == (
+            'Searching the docs to find "OpenAI API docs"'
+        )
+        assert build_tool_progress_topic("terminal", {"command": "hermes models list"}) == (
+            "Verifying available models to see which models this runtime can use"
+        )
 
 
 class TestBuildChildProgressCallback:
@@ -176,10 +182,10 @@ class TestBuildChildProgressCallback:
 
         parent_cb.assert_called_once()
         summary = parent_cb.call_args[0][1]
-        assert "Searching the docs" in summary
-        assert "Checking your config" in summary
-        assert "Verifying available models" in summary
-        assert summary.count("Searching the docs") == 1
+        assert 'Searching the docs to find "OpenAI API docs"' in summary
+        assert "Checking your config to verify the setting in config.yaml" in summary
+        assert "Verifying available models to see which models this runtime can use" in summary
+        assert summary.count('Searching the docs to find "OpenAI API docs"') == 1
 
     def test_parallel_callbacks_independent(self):
         """Each child's callback should have independent batch state."""
@@ -367,8 +373,8 @@ class TestBatchFlush:
         cb._flush()
         parent_cb.assert_called_once()
         summary = parent_cb.call_args[0][1]
-        assert "Researching online" in summary
-        assert "Updating local files" in summary
+        assert 'Researching online to look into "query1"' in summary
+        assert "Updating local files to update out.txt" in summary
 
     def test_flush_noop_when_batch_empty(self):
         """_flush should not send anything when batch is empty."""

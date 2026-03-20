@@ -72,13 +72,31 @@ class TestFormatConversation:
         ]
         result = _format_conversation(msgs)
         assert "[TOOL:web_search]" in result
+        assert "search results" in result
+
+    def test_tool_message_json_noise_is_summarized(self):
+        msgs = [
+            {
+                "role": "tool",
+                "tool_name": "todo",
+                "content": json.dumps({
+                    "todos": [{"id": "a", "status": "completed"}, {"id": "b", "status": "pending"}],
+                    "summary": {"total": 2, "completed": 1, "pending": 1},
+                }),
+            },
+        ]
+        result = _format_conversation(msgs)
+        assert "[TOOL:todo]" in result
+        assert "todo list updated" in result.lower()
+        assert '"todos"' not in result
 
     def test_long_tool_output_truncated(self):
         msgs = [
             {"role": "tool", "content": "x" * 1000, "tool_name": "terminal"},
         ]
         result = _format_conversation(msgs)
-        assert "[truncated]" in result
+        assert "omitted" in result.lower()
+        assert len(result) < 400
 
     def test_assistant_with_tool_calls(self):
         msgs = [

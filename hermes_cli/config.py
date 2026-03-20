@@ -302,6 +302,7 @@ DEFAULT_CONFIG = {
         "user_profile_enabled": True,
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
+        "learnings_char_limit": 12000,  # QMD-indexed workflow learnings, not prompt-injected
         "qmd": {
             "command": "qmd",
             "search_mode": "query",          # query | search | vsearch

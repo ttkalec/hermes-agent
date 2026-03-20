@@ -346,6 +346,57 @@ def build_tool_progress_topic(
         text = _oneline(str(text))
         return text if len(text) <= limit else text[: limit - 3] + "..."
 
+    def _label_path(path: str) -> str:
+        text = str(path or "")
+        if not text:
+            return "the relevant file"
+        parts = [part for part in text.replace("\\", "/").split("/") if part]
+        return parts[-1] if parts else text
+
+    def _domain(url: str) -> str:
+        text = str(url or "")
+        return text.replace("https://", "").replace("http://", "").split("/")[0] or "the target site"
+
+    def _focus() -> str | None:
+        query = _oneline(str(args.get("query", "")))
+        if query:
+            return f'"{_trunc(query, 28)}"'
+
+        pattern = _oneline(str(args.get("pattern", "")))
+        if pattern:
+            return f'"{_trunc(pattern, 28)}"'
+
+        path = args.get("path")
+        if path:
+            return _trunc(_label_path(str(path)), 28)
+
+        command = _oneline(str(args.get("command", "")))
+        if command:
+            return f'`{_trunc(command, 28)}`'
+
+        url = args.get("url")
+        if url:
+            return _trunc(_domain(str(url)), 28)
+
+        urls = args.get("urls")
+        if isinstance(urls, list) and urls:
+            return _trunc(_domain(str(urls[0])), 28)
+        if urls:
+            return _trunc(_domain(str(urls)), 28)
+
+        name = _oneline(str(args.get("name", "")))
+        if name:
+            return f'"{_trunc(name, 28)}"'
+
+        if preview:
+            return f'"{_trunc(str(preview), 28)}"'
+        return None
+
+    def _with_goal(base: str, reason: str | None = None) -> str:
+        if reason:
+            return _trunc(f"{base} to {reason}")
+        return _trunc(base)
+
     hint_parts = []
     if preview:
         hint_parts.append(str(preview))
@@ -359,6 +410,7 @@ def build_tool_progress_topic(
     elif urls:
         hint_parts.append(str(urls))
     hint_text = " ".join(hint_parts).lower()
+    focus = _focus()
 
     config_terms = (
         "config", "configuration", "settings", "setting", "preferences",
@@ -378,30 +430,44 @@ def build_tool_progress_topic(
         return _trunc(preview or "Thinking through the task")
 
     if any(term in hint_text for term in config_terms):
-        return "Checking your config"
+        reason = f"verify the setting in {focus}" if focus else "verify the relevant setting"
+        return _with_goal("Checking your config", reason)
     if any(term in hint_text for term in docs_terms) and tool_name in {
         "web_search", "web_extract", "browser_navigate", "browser_snapshot", "search_files", "read_file",
     }:
-        return "Searching the docs"
+        reason = f"find {focus}" if focus else "confirm the relevant details"
+        return _with_goal("Searching the docs", reason)
     if any(term in hint_text for term in model_terms):
-        return "Verifying available models"
+        if args.get("command"):
+            reason = "see which models this runtime can use"
+        else:
+            reason = f"check whether {focus} is available" if focus else "see which models are available"
+        return _with_goal("Verifying available models", reason)
 
     if tool_name in {"read_file", "search_files"}:
-        return "Inspecting local files"
+        reason = f"find {focus}" if focus else "find the relevant code or data"
+        return _with_goal("Inspecting local files", reason)
     if tool_name in {"write_file", "patch"}:
-        return "Updating local files"
+        reason = f"update {focus}" if focus else "apply the requested change"
+        return _with_goal("Updating local files", reason)
     if tool_name in {"web_search", "web_extract", "web_crawl"}:
-        return "Researching online"
+        reason = f"look into {focus}" if focus else "gather the needed information"
+        return _with_goal("Researching online", reason)
     if tool_name.startswith("browser_"):
-        return "Working in the browser"
+        reason = f"work through {focus}" if focus else "interact with the current page"
+        return _with_goal("Working in the browser", reason)
     if tool_name in {"terminal", "process", "execute_code"}:
-        return "Running task commands"
+        reason = f"run {focus}" if focus else "inspect or modify the environment"
+        return _with_goal("Running task commands", reason)
     if tool_name == "todo":
-        return "Planning the work"
+        return _with_goal("Planning the work", "track the next concrete steps")
     if tool_name == "delegate_task":
-        return "Delegating work to subagents"
+        return _with_goal("Delegating work to subagents", "parallelize the task")
 
-    return _trunc(build_tool_status_text(tool_name, args, max_len=max_len), max_len)
+    status_text = build_tool_status_text(tool_name, args, max_len=max_len)
+    if focus and focus not in status_text:
+        return _with_goal(status_text, f"work on {focus}")
+    return _trunc(status_text, max_len)
 
 
 # =========================================================================
