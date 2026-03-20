@@ -8,6 +8,17 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 source .venv/bin/activate  # ALWAYS activate before running Python
 ```
 
+### Service Management
+
+All agents run as launchd services. Use `hermes-restart-all` (located at `~/bin/hermes-restart-all`) to manage them:
+
+```bash
+hermes-restart-all           # Stop all agents, kill stragglers, restart, poll until healthy
+hermes-restart-all --status  # Health check only, no restart
+```
+
+The script handles both mirko and slavko agents (slavko's via SSH), force-kills zombie processes, clears occupied ports, and retries agents that fail to start. Manager agents take ~30s to boot due to Discord/Telegram connections — the script polls rather than using a fixed wait.
+
 ## Project Structure
 
 ```
