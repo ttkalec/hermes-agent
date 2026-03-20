@@ -169,6 +169,12 @@ DEFAULT_CONFIG = {
         "max_simple_words": 28,
         "cheap_model": {},
     },
+
+    # Model-specific prompt tuning — inject vendor-recommended prompting
+    # patterns (tool persistence, verification loops, XML structuring, etc.)
+    # into the system prompt based on the active model family.
+    # Set to false to revert to model-agnostic prompting (pre-v0.3 behavior).
+    "model_prompt_tuning": False,
     
     # Auxiliary model config — provider:model for each side task.
     # Format: provider is the provider name, model is the model slug.

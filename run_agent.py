@@ -85,7 +85,7 @@ from agent.model_metadata import (
 )
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_model_guidance
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -1889,6 +1889,17 @@ class AIAgent:
         else:
             _identity = DEFAULT_AGENT_IDENTITY
         prompt_parts = [_identity]
+
+        # Model-specific prompt tuning (opt-in via config.yaml: model_prompt_tuning: true)
+        try:
+            from hermes_cli.config import load_config as _load_cfg
+            _cfg = _load_cfg()
+        except Exception:
+            _cfg = {}
+        if _cfg.get("model_prompt_tuning", False):
+            _model_guidance = build_model_guidance(self.model or "")
+            if _model_guidance:
+                prompt_parts.append(_model_guidance)
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []

@@ -223,6 +223,199 @@ PLATFORM_HINTS = {
     ),
 }
 
+# =========================================================================
+# Model-specific prompt tuning
+# =========================================================================
+
+# GPT-5.4 guidance — based on OpenAI's official prompt guidance for GPT-5.4.
+# Focuses on patterns where GPT-5.4 needs explicit direction: tool persistence,
+# dependency checks, empty-result recovery, verification loops.
+GPT_5_4_GUIDANCE = """\
+<model_prompt_tuning>
+<tool_persistence>
+Use tools whenever they materially improve correctness. Do not stop early when \
+additional tool calls would enhance completeness. Keep calling until the task is \
+complete and verification passes.
+</tool_persistence>
+
+<dependency_checks>
+Verify prerequisite discovery and lookup steps before taking actions. Do not skip \
+foundational steps assuming the end state is obvious.
+</dependency_checks>
+
+<empty_result_recovery>
+When lookups return empty results, do not conclude immediately. Try 1-2 fallback \
+strategies: alternate query wording, broader filters, prerequisite lookups, or \
+alternate sources.
+</empty_result_recovery>
+
+<completeness>
+Track required deliverables internally. For lists or batches, determine expected \
+scope, track processed items, and confirm coverage before finalizing. Mark blocked \
+items explicitly rather than silently dropping them.
+</completeness>
+
+<verification>
+Before finalizing any task: check correctness against requirements, verify factual \
+claims are grounded in context or tool outputs, confirm formatting matches the \
+requested schema, and evaluate irreversibility and safety.
+</verification>
+
+<parallelism>
+Parallelize independent retrieval and tool calls to reduce latency. Sequence steps \
+that have prerequisites or where one result determines the next action.
+</parallelism>
+
+<output_discipline>
+Define and follow a clear output structure. Constrain verbosity through structural \
+requirements. Emit only the target format for structured outputs (SQL, JSON, code). \
+Do not add unsolicited prose around structured output.
+</output_discipline>
+</model_prompt_tuning>"""
+
+# Claude guidance — based on Anthropic's official prompting best practices.
+# Focuses on patterns where Claude excels or needs steering: XML structure,
+# grounding, subagent restraint, dialed-back tool aggression.
+CLAUDE_GUIDANCE = """\
+<model_prompt_tuning>
+<tool_usage>
+Use tools when they would enhance your understanding of the problem. A direct \
+search is often better than spawning a subagent for simple lookups. When working \
+with multiple independent lookups, parallelize them in a single response.
+</tool_usage>
+
+<grounding>
+When answering questions about code, documents, or data, quote the relevant \
+parts first before synthesizing your answer. Base claims only on provided context \
+or tool outputs — never fabricate citations, URLs, or references.
+</grounding>
+
+<structural_clarity>
+Use XML tags to separate distinct sections of your output when the response \
+contains multiple logical parts (e.g., analysis vs. recommendation, code vs. \
+explanation). This improves parseability for downstream consumers.
+</structural_clarity>
+
+<action_bias>
+Default to implementing changes rather than only suggesting them. If the user's \
+intent is unclear, infer the most useful action and proceed, using tools to \
+discover missing details instead of guessing. Take action unless explicitly \
+told to only advise.
+</action_bias>
+
+<formatting>
+Write in clear, direct prose. Tell the user what to do instead of what not to do. \
+When a specific output format is needed, match your response style to that format. \
+Reserve markdown for code blocks and simple headings — avoid excessive bullets, \
+bold, and nested lists unless requested.
+</formatting>
+
+<verification>
+Before finalizing, verify your answer against the original requirements. For \
+coding tasks, check that your changes compile or pass lint. Ask yourself whether \
+claims are grounded in tool output rather than assumed.
+</verification>
+</model_prompt_tuning>"""
+
+
+# GPT-5.4-mini guidance — based on OpenAI's official small-model guidance.
+# Mini is more literal than the full model and makes fewer implicit assumptions.
+# Needs: critical rules first, explicit execution order, structural scaffolding,
+# explicit ambiguity handling. Inherits the core GPT-5.4 patterns but adds
+# scaffolding that the full model doesn't need.
+GPT_5_4_MINI_GUIDANCE = """\
+<model_prompt_tuning>
+<execution_order>
+Follow these steps in order for every task:
+1. Read the user's request and identify the core deliverable.
+2. Check prerequisites — do you have the information and context needed?
+3. If prerequisites are missing, use tools to gather them before proceeding.
+4. Execute the task using the appropriate tools.
+5. Verify the result against the original request.
+6. Respond with the deliverable in the requested format.
+</execution_order>
+
+<critical_rules>
+These rules take priority over all other guidance:
+- Never fabricate file paths, function names, URLs, or citations. If unsure, \
+use a tool to look it up.
+- Never skip tool calls to save time. If a tool would improve accuracy, call it.
+- When a lookup returns empty results, try one alternate query before concluding \
+the information is unavailable.
+- Do not assume the end state is obvious. Verify prerequisite steps explicitly.
+</critical_rules>
+
+<ambiguity_handling>
+When the user's request is ambiguous:
+- If you can resolve the ambiguity with a tool call (e.g., reading a file, \
+searching), do that instead of asking.
+- If the ambiguity cannot be resolved with tools, state your assumption clearly \
+and proceed. Do not stall.
+- If multiple valid interpretations exist and the consequences differ \
+significantly, ask one focused clarifying question.
+</ambiguity_handling>
+
+<output_format>
+- Keep responses focused and concise. Avoid preambles and sign-offs.
+- For structured outputs (JSON, code, SQL), emit only the target format. \
+Do not wrap it in prose or explanations unless the user asked for them.
+- Use flat, numbered lists when presenting multiple items. Avoid nested bullets.
+- When returning code, include only the changed or requested code. Do not \
+repeat unchanged surrounding context.
+</output_format>
+
+<tool_persistence>
+Use tools whenever they materially improve correctness. Do not stop early when \
+additional tool calls would enhance completeness. Keep calling until the task is \
+complete and verification passes.
+</tool_persistence>
+
+<completeness>
+Track required deliverables internally. For lists or batches, determine expected \
+scope, track processed items, and confirm coverage before finalizing. Mark blocked \
+items explicitly rather than silently dropping them.
+</completeness>
+</model_prompt_tuning>"""
+
+
+def _detect_model_family(model: str) -> str:
+    """Detect model family from the model string.
+
+    Returns one of: "gpt-5.4-mini", "gpt-5.4", "claude", or "unknown".
+    """
+    m = model.lower()
+    # GPT-5.4-mini must be checked before GPT-5.4 (substring match)
+    if "gpt-5.4-mini" in m or "gpt-5-4-mini" in m:
+        return "gpt-5.4-mini"
+    # GPT-5.4 full variants: "gpt-5.4", "openai/gpt-5.4*"
+    if "gpt-5.4" in m or "gpt-5-4" in m:
+        return "gpt-5.4"
+    # Claude variants: "claude-*", "anthropic/claude-*"
+    if "claude" in m:
+        return "claude"
+    # OpenAI models that aren't GPT-5.4 (gpt-4o, o3, etc.) — use GPT-5.4 patterns
+    # as a reasonable approximation since they're the same vendor.
+    if "openai/" in m or m.startswith("gpt-") or m.startswith("o1") or m.startswith("o3"):
+        return "gpt-5.4"
+    return "unknown"
+
+
+def build_model_guidance(model: str) -> str:
+    """Return model-family-specific prompt tuning overlay.
+
+    Returns an empty string for unrecognised model families so the system
+    prompt falls back to model-agnostic behaviour (pre-existing default).
+    """
+    family = _detect_model_family(model)
+    if family == "gpt-5.4-mini":
+        return GPT_5_4_MINI_GUIDANCE
+    elif family == "gpt-5.4":
+        return GPT_5_4_GUIDANCE
+    elif family == "claude":
+        return CLAUDE_GUIDANCE
+    return ""
+
+
 CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
