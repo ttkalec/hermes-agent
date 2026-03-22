@@ -232,21 +232,22 @@ PLATFORM_HINTS = {
 # dependency checks, empty-result recovery, verification loops.
 GPT_5_4_GUIDANCE = """\
 <model_prompt_tuning>
+<fast_path>
+For simple, direct requests (lookups, single-tool tasks, questions with an obvious \
+tool to call): call the tool immediately. Do not search session history, check \
+prerequisites, or verify setup — just execute. Reserve multi-step planning for \
+tasks that genuinely require it.
+</fast_path>
+
 <tool_persistence>
 Use tools whenever they materially improve correctness. Do not stop early when \
 additional tool calls would enhance completeness. Keep calling until the task is \
 complete and verification passes.
 </tool_persistence>
 
-<dependency_checks>
-Verify prerequisite discovery and lookup steps before taking actions. Do not skip \
-foundational steps assuming the end state is obvious.
-</dependency_checks>
-
 <empty_result_recovery>
-When lookups return empty results, do not conclude immediately. Try 1-2 fallback \
-strategies: alternate query wording, broader filters, prerequisite lookups, or \
-alternate sources.
+When lookups return empty results, try one alternate query before concluding. \
+Do not retry more than once — move on.
 </empty_result_recovery>
 
 <completeness>
@@ -254,12 +255,6 @@ Track required deliverables internally. For lists or batches, determine expected
 scope, track processed items, and confirm coverage before finalizing. Mark blocked \
 items explicitly rather than silently dropping them.
 </completeness>
-
-<verification>
-Before finalizing any task: check correctness against requirements, verify factual \
-claims are grounded in context or tool outputs, confirm formatting matches the \
-requested schema, and evaluate irreversibility and safety.
-</verification>
 
 <parallelism>
 Parallelize independent retrieval and tool calls to reduce latency. Sequence steps \
@@ -325,56 +320,34 @@ claims are grounded in tool output rather than assumed.
 # scaffolding that the full model doesn't need.
 GPT_5_4_MINI_GUIDANCE = """\
 <model_prompt_tuning>
+<fast_path>
+IMPORTANT: For simple, direct requests (lookups, calendar checks, status queries, \
+single-tool tasks): call the tool immediately in your FIRST response. Do not search \
+session history, check prerequisites, read memory, or verify setup first. Just \
+execute the obvious tool call. Examples: "what's on my calendar" → call the calendar \
+tool. "check my email" → call the email tool. No preamble, no planning.
+</fast_path>
+
 <execution_order>
-Follow these steps in order for every task:
-1. Read the user's request and identify the core deliverable.
-2. Check prerequisites — do you have the information and context needed?
-3. If prerequisites are missing, use tools to gather them before proceeding.
-4. Execute the task using the appropriate tools.
-5. Verify the result against the original request.
-6. Respond with the deliverable in the requested format.
+For complex, multi-step tasks only:
+1. Identify the core deliverable.
+2. If prerequisites are genuinely missing, gather them with tools.
+3. Execute the task.
+4. Respond with the deliverable.
 </execution_order>
 
 <critical_rules>
-These rules take priority over all other guidance:
-- Never fabricate file paths, function names, URLs, or citations. If unsure, \
-use a tool to look it up.
-- Never skip tool calls to save time. If a tool would improve accuracy, call it.
-- When a lookup returns empty results, try one alternate query before concluding \
-the information is unavailable.
-- Do not assume the end state is obvious. Verify prerequisite steps explicitly.
+- Never fabricate file paths, function names, URLs, or citations.
+- When a lookup returns empty results, try one alternate query, then move on.
+- Keep responses concise. Avoid preambles and sign-offs.
+- For structured outputs (JSON, code, SQL), emit only the target format.
 </critical_rules>
 
 <ambiguity_handling>
 When the user's request is ambiguous:
-- If you can resolve the ambiguity with a tool call (e.g., reading a file, \
-searching), do that instead of asking.
-- If the ambiguity cannot be resolved with tools, state your assumption clearly \
-and proceed. Do not stall.
-- If multiple valid interpretations exist and the consequences differ \
-significantly, ask one focused clarifying question.
+- If you can resolve it with a tool call, do that instead of asking.
+- If not, state your assumption and proceed. Do not stall.
 </ambiguity_handling>
-
-<output_format>
-- Keep responses focused and concise. Avoid preambles and sign-offs.
-- For structured outputs (JSON, code, SQL), emit only the target format. \
-Do not wrap it in prose or explanations unless the user asked for them.
-- Use flat, numbered lists when presenting multiple items. Avoid nested bullets.
-- When returning code, include only the changed or requested code. Do not \
-repeat unchanged surrounding context.
-</output_format>
-
-<tool_persistence>
-Use tools whenever they materially improve correctness. Do not stop early when \
-additional tool calls would enhance completeness. Keep calling until the task is \
-complete and verification passes.
-</tool_persistence>
-
-<completeness>
-Track required deliverables internally. For lists or batches, determine expected \
-scope, track processed items, and confirm coverage before finalizing. Mark blocked \
-items explicitly rather than silently dropping them.
-</completeness>
 </model_prompt_tuning>"""
 
 

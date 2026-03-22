@@ -1405,12 +1405,17 @@ def call_llm(
             api_key=resolved_api_key,
         )
         if client is None:
-            # Fallback: try openrouter
-            if resolved_provider != "openrouter" and not resolved_base_url:
-                logger.warning("Provider %s unavailable, falling back to openrouter",
-                               resolved_provider)
+            # Only fall back to openrouter for auto-resolved providers.
+            # Explicitly configured providers should fail loudly.
+            if resolved_provider == "auto":
+                logger.warning("Auto-resolved provider unavailable for task=%s, falling back to openrouter", task)
                 client, final_model = _get_cached_client(
                     "openrouter", resolved_model or _OPENROUTER_MODEL)
+            else:
+                logger.error(
+                    "Auxiliary provider '%s' unavailable for task=%s. "
+                    "Check credentials (hermes login) or set auxiliary.%s.provider to 'auto'.",
+                    resolved_provider, task, task or "default")
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
@@ -1488,12 +1493,16 @@ async def async_call_llm(
             api_key=resolved_api_key,
         )
         if client is None:
-            if resolved_provider != "openrouter" and not resolved_base_url:
-                logger.warning("Provider %s unavailable, falling back to openrouter",
-                               resolved_provider)
+            if resolved_provider == "auto":
+                logger.warning("Auto-resolved provider unavailable for task=%s, falling back to openrouter", task)
                 client, final_model = _get_cached_client(
                     "openrouter", resolved_model or _OPENROUTER_MODEL,
                     async_mode=True)
+            else:
+                logger.error(
+                    "Auxiliary provider '%s' unavailable for task=%s. "
+                    "Check credentials (hermes login) or set auxiliary.%s.provider to 'auto'.",
+                    resolved_provider, task, task or "default")
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "

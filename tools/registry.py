@@ -142,7 +142,7 @@ class ToolRegistry:
                 if isinstance(result, str):
                     try:
                         parsed = json.loads(result)
-                        is_error = isinstance(parsed, dict) and "error" in parsed
+                        is_error = isinstance(parsed, dict) and bool(parsed.get("error"))
                     except (json.JSONDecodeError, TypeError):
                         pass
                 activity_logger.log_tool_call(

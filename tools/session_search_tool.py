@@ -160,6 +160,14 @@ async def _summarize_session(
 
             return None
         except Exception as e:
+            # Don't retry client errors (400, 401, 403, 404) — they won't
+            # succeed on retry (e.g. unsupported params for the provider).
+            err_str = str(e)
+            if any(f"Error code: {c}" in err_str for c in (400, 401, 403, 404)):
+                logging.warning(
+                    "Session summarization failed (non-retryable): %s", e,
+                )
+                return None
             if attempt < max_retries - 1:
                 await asyncio.sleep(1 * (attempt + 1))
             else:

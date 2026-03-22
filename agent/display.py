@@ -518,9 +518,15 @@ class KawaiiSpinner:
         # Capture stdout NOW, before any redirect_stdout(devnull) from
         # child agents can replace sys.stdout with a black hole.
         self._out = sys.stdout
+        # Disable spinner when stdout is not a terminal (e.g. launchd
+        # redirecting to a log file) — animation frames are meaningless
+        # in log files and cause massive bloat.
+        self._disabled = not hasattr(self._out, 'isatty') or not self._out.isatty()
 
     def _write(self, text: str, end: str = '\n', flush: bool = False):
         """Write to the stdout captured at spinner creation time."""
+        if self._disabled:
+            return
         try:
             self._out.write(text + end)
             if flush:
@@ -562,7 +568,7 @@ class KawaiiSpinner:
             time.sleep(0.12)
 
     def start(self):
-        if self.running:
+        if self.running or self._disabled:
             return
         self.running = True
         self.start_time = time.time()

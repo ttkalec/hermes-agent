@@ -1031,7 +1031,7 @@ class GatewayRunner:
         self._agent_app.router.add_get("/agent/health", self._agent_health)
         self._agent_app.router.add_post("/agent/ask", self._agent_ask)
 
-        runner = web.AppRunner(self._agent_app)
+        runner = web.AppRunner(self._agent_app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", port)
         await site.start()
