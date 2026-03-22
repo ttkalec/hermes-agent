@@ -4339,6 +4339,20 @@ class AIAgent:
                     logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                     logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
 
+            # Log to activity logger (concurrent path bypasses registry logging)
+            try:
+                activity_logger.log_tool_call(
+                    tool_name=name,
+                    args=args,
+                    result=function_result,
+                    duration_secs=tool_duration,
+                    session_id=self.session_id,
+                    success=not (r and r[4]),
+                    error_message=function_result[:200] if r and r[4] else None,
+                )
+            except Exception:
+                pass
+
             # Print cute message per tool
             if self.quiet_mode:
                 cute_msg = _get_cute_tool_message_impl(name, args, tool_duration, result=function_result)

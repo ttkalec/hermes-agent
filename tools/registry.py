@@ -150,6 +150,7 @@ class ToolRegistry:
                     args=args,
                     result=result,
                     duration_secs=_duration,
+                    session_id=kwargs.get("session_id"),
                     success=not is_error,
                     error_message=result[:200] if is_error else None,
                 )

@@ -10,6 +10,7 @@ the first 6 and last 4 characters for debuggability.
 import logging
 import os
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +152,15 @@ def redact_sensitive_text(text: str) -> str:
 
 
 class RedactingFormatter(logging.Formatter):
-    """Log formatter that redacts secrets from all log messages."""
+    """Log formatter that redacts secrets from all log messages.
+
+    Timestamps are always UTC for consistency with activity.jsonl.
+    """
+    converter = time.gmtime
 
     def __init__(self, fmt=None, datefmt=None, style='%', **kwargs):
+        if datefmt is None:
+            datefmt = '%Y-%m-%d %H:%M:%S UTC'
         super().__init__(fmt, datefmt, style, **kwargs)
 
     def format(self, record: logging.LogRecord) -> str:
